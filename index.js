@@ -26,6 +26,20 @@ app.get('/', (req, res) => {
     res.send('Hello World!');
 });
 
+// Feature 1
+app.get('/products', (req, res) => {
+    const queryParamters = {
+        name: req.query.name || "",
+        inStock: req.query.inStock === "true"
+    };
+
+    const filteredProducts = products
+        .filter(product => queryParamters.inStock ? product.stock > 0 : true)
+        .filter(product => product.name.toLowerCase().includes(queryParamters.name.toLowerCase()));
+    res.status(200).json(filteredProducts);
+});
+
+// Feature 2
 app.post('/products', (req, res) => {
     const requiredFields = ['name', 'price', 'dimensions', 'stock'];
     const product = req.body;
