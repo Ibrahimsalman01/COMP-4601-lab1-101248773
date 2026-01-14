@@ -2,8 +2,54 @@ const express = require("express");
 const app = express();
 const PORT = 3000;
 
+app.use(express.json());
+
+const products = [
+    {"name":"Tasty Cotton Chair","price":444,"dimensions":{"x":2,"y":4,"z":5},"stock":21,"id":0},
+    {"name":"Small Concrete Towels","price":806,"dimensions":{"x":4,"y":7,"z":8},"stock":47,"id":1},
+    {"name":"Small Metal Tuna","price":897,"dimensions":{"x":7,"y":4,"z":5},"stock":13,"id":2},
+    {"name":"Generic Fresh Chair","price":403,"dimensions":{"x":3,"y":8,"z":11},"stock":47,"id":3},
+    {"name":"Generic Steel Keyboard","price":956,"dimensions":{"x":3,"y":8,"z":6},"stock":8,"id":4},
+    {"name":"Refined Metal Bike","price":435,"dimensions":{"x":7,"y":5,"z":5},"stock":36,"id":5},
+    {"name":"Practical Steel Pizza","price":98,"dimensions":{"x":4,"y":7,"z":4},"stock":12,"id":6},
+    {"name":"Awesome Wooden Bike","price":36,"dimensions":{"x":11,"y":10,"z":10},"stock":3,"id":7},
+    {"name":"Licensed Cotton Keyboard","price":990,"dimensions":{"x":8,"y":7,"z":3},"stock":27,"id":8},
+    {"name":"Incredible Fresh Hat","price":561,"dimensions":{"x":6,"y":7,"z":5},"stock":28,"id":9},
+    {"name":"Tasty Cotton Soap","price":573,"dimensions":{"x":2,"y":6,"z":11},"stock":31,"id":10},
+    {"name":"Intelligent Metal Mouse","price":3,"dimensions":{"x":4,"y":5,"z":10},"stock":0,"id":11},
+    {"name":"Practical Plastic Ball","price":11,"dimensions":{"x":11,"y":9,"z":11},"stock":25,"id":12},
+    {"name":"Rustic Fresh Tuna","price":159,"dimensions":{"x":8,"y":6,"z":8},"stock":30,"id":13},
+    {"name":"Small Metal Tuna","price":225,"dimensions":{"x":8,"y":10,"z":8},"stock":49,"id":14}
+];
+
 app.get('/', (req, res) => {
     res.send('Hello World!');
+});
+
+app.post('/products', (req, res) => {
+    const requiredFields = ['name', 'price', 'dimensions', 'stock'];
+    const product = req.body;
+    const id = products.length > 0 
+        ? products[products.length - 1].id + 1
+        : 1;
+
+    try {
+        const productFields = Object.keys(product);
+        if (
+            productFields.length !== requiredFields.length ||
+            !productFields.every(field => requiredFields.includes(field))
+        ) {
+            return res.status(400).json({ error: 'Missing field(s)' });
+        }
+        
+        const newProduct = { ...product, id };
+        products.push(newProduct);
+
+        res.status(201).json(newProduct);
+    } catch (error) {
+        console.error(`Error creating new product: ${error}`);
+        res.status(500).json({ error });
+    }
 });
 
 app.listen(PORT, () => {
