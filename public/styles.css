@@ -108,6 +108,10 @@ input:focus, select:focus {
   background: rgba(255, 255, 255, 0.08);
 }
 
+option {
+  color: black;
+}
+
 /* Buttons */
 button {
   padding: 10px 14px;
