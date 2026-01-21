@@ -93,7 +93,7 @@ function productToHtml(product) {
     <h2>Links</h2>
     <ul>
       <li><a href="/products/${product.id}">This product (HTML)</a></li>
-      <li><a href="/products/${product.id}/reviews">This product's reviews (HTML)</a></li>
+      <li><a href="/reviews/${product.id}">This product's reviews (HTML)</a></li>
       <li><a href="/products/${product.id}" onclick="event.preventDefault(); window.location='/products/${product.id}';">Refresh</a></li>
     </ul>
 
@@ -125,7 +125,7 @@ function reviewsToHtml(product) {
     <h1>Reviews for: ${escapeHtml(product.name)} (ID: ${product.id})</h1>
     <ul>${items}</ul>
     <p><a href="/products/${product.id}">Back to product</a></p>
-    <p>Try JSON with <code>Accept: application/json</code> or: <a href="/products/${product.id}/reviews?force=json">/products/${product.id}/reviews?force=json</a></p>
+    <p>Try JSON with <code>Accept: application/json</code> or: <a href="/reviews/${product.id}?force=json">/reviews/${product.id}?force=json</a></p>
   </div>
 </body>
 </html>`;
@@ -207,7 +207,7 @@ app.get("/products/:id", (req, res) => {
  * POST /products/:id/reviews
  * body: { "rating": 7 }
  */
-app.post("/products/:id/reviews", (req, res) => {
+app.post("/reviews/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Product id must be an integer." });
 
@@ -229,7 +229,7 @@ app.post("/products/:id/reviews", (req, res) => {
  * 5) Get only reviews for a product, JSON or HTML
  * GET /products/:id/reviews
  */
-app.get("/products/:id/reviews", (req, res) => {
+app.get("/reviews/:id", (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "Product id must be an integer." });
 

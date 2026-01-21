@@ -72,7 +72,7 @@ document.getElementById("btnAddReview").addEventListener("click", async () => {
   const id = document.getElementById("reviewProductId").value.trim();
   const rating = Number(document.getElementById("reviewRating").value);
 
-  const res = await fetch(`/products/${encodeURIComponent(id)}/reviews`, {
+  const res = await fetch(`/reviews/${encodeURIComponent(id)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ rating }),
@@ -84,7 +84,7 @@ document.getElementById("btnAddReview").addEventListener("click", async () => {
 
 document.getElementById("btnGetReviewsJson").addEventListener("click", async () => {
   const id = document.getElementById("reviewProductId").value.trim();
-  const res = await fetch(`/products/${encodeURIComponent(id)}/reviews`, {
+  const res = await fetch(`/reviews/${encodeURIComponent(id)}`, {
     headers: { Accept: "application/json" },
   });
   const out = await readJson(res);
@@ -93,5 +93,5 @@ document.getElementById("btnGetReviewsJson").addEventListener("click", async () 
 
 document.getElementById("btnOpenReviewsHtml").addEventListener("click", () => {
   const id = document.getElementById("reviewProductId").value.trim();
-  window.open(`/products/${encodeURIComponent(id)}/reviews?force=html`, "_blank");
+  window.open(`/reviews/${encodeURIComponent(id)}?force=html`, "_blank");
 });
