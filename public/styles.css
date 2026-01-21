@@ -1,0 +1,175 @@
+/* public/styles.css */
+
+:root {
+  --bg: #0b1220;
+  --panel: rgba(255, 255, 255, 0.06);
+  --panel-strong: rgba(255, 255, 255, 0.10);
+  --text: #e8edf7;
+  --muted: rgba(232, 237, 247, 0.72);
+  --border: rgba(232, 237, 247, 0.14);
+
+  --accent: #7c5cff;
+  --accent-2: #33d6a6;
+
+  --shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+  --shadow-soft: 0 10px 24px rgba(0, 0, 0, 0.25);
+
+  --radius: 14px;
+  --radius-sm: 10px;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--text);
+  line-height: 1.45;
+
+  /* Gradient background */
+  background:
+    radial-gradient(1200px 800px at 15% 10%, rgba(124, 92, 255, 0.28), transparent 60%),
+    radial-gradient(900px 700px at 85% 20%, rgba(51, 214, 166, 0.18), transparent 55%),
+    radial-gradient(700px 600px at 50% 95%, rgba(124, 92, 255, 0.12), transparent 60%),
+    var(--bg);
+}
+
+/* ---------- Layout ---------- */
+.container {
+  max-width: 1050px;
+  margin: 0 auto;
+  padding: 28px 18px 48px;
+}
+
+header {
+  margin-bottom: 18px;
+}
+
+h1 {
+  font-size: 28px;
+  margin: 0 0 6px;
+  letter-spacing: 0.2px;
+}
+
+.subtitle {
+  margin: 0;
+  color: var(--muted);
+}
+
+.card {
+  background: linear-gradient(180deg, var(--panel), rgba(255,255,255,0.04));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  padding: 16px;
+  margin-top: 14px;
+  backdrop-filter: blur(10px);
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  letter-spacing: 0.2px;
+}
+
+/* Row layout (.row divs) */
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+input, select, button, textarea {
+  font: inherit;
+}
+
+/* ---------- Controls ---------- */
+input, select {
+  min-width: 160px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+input::placeholder { color: rgba(232, 237, 247, 0.45); }
+
+input:focus, select:focus {
+  border-color: rgba(124, 92, 255, 0.60);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Buttons */
+button {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(124, 92, 255, 0.35);
+  background: linear-gradient(180deg, rgba(124, 92, 255, 0.35), rgba(124, 92, 255, 0.18));
+  color: var(--text);
+  cursor: pointer;
+  box-shadow: 0 10px 18px rgba(0,0,0,0.25);
+  transition: transform 120ms ease, background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(124, 92, 255, 0.60);
+  background: linear-gradient(180deg, rgba(124, 92, 255, 0.44), rgba(124, 92, 255, 0.20));
+  box-shadow: 0 14px 22px rgba(0,0,0,0.30);
+}
+
+button:active {
+  transform: translateY(0px);
+  box-shadow: 0 8px 16px rgba(0,0,0,0.25);
+}
+
+/* Secondary button style */
+button.secondary {
+  border-color: rgba(232, 237, 247, 0.18);
+  background: rgba(255,255,255,0.06);
+}
+
+button.secondary:hover {
+  border-color: rgba(232, 237, 247, 0.28);
+  background: rgba(255,255,255,0.09);
+}
+
+/* ---------- Output blocks ---------- */
+pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(232, 237, 247, 0.92);
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow: auto;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+}
+
+/* ---------- Links ---------- */
+a {
+  color: rgba(124, 92, 255, 0.95);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Small screens ---------- */
+@media (max-width: 560px) {
+  h1 { font-size: 24px; }
+  input, select { min-width: 100%; }
+  button { width: 100%; }
+}
