@@ -41,7 +41,7 @@ document.getElementById("btnGetProductJson").addEventListener("click", async () 
 
 document.getElementById("btnOpenProductHtml").addEventListener("click", () => {
   const id = document.getElementById("productId").value.trim();
-  window.open(`/products/${encodeURIComponent(id)}?force=html`, "_blank");
+  window.open(`/products/${encodeURIComponent(id)}`, "_blank");
 });
 
 // Create product
@@ -93,5 +93,5 @@ document.getElementById("btnGetReviewsJson").addEventListener("click", async () 
 
 document.getElementById("btnOpenReviewsHtml").addEventListener("click", () => {
   const id = document.getElementById("reviewProductId").value.trim();
-  window.open(`/reviews/${encodeURIComponent(id)}?force=html`, "_blank");
+  window.open(`/reviews/${encodeURIComponent(id)}`, "_blank");
 });

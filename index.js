@@ -39,7 +39,6 @@ function findProductById(id) {
 }
 
 function validateNewProduct(body) {
-  // Expect: name (string), price (number), dimensions {x,y,z} (numbers), stock (number)
   if (typeof body !== "object" || body === null) return "Body must be a JSON object.";
 
   const { name, price, dimensions, stock } = body;
@@ -53,7 +52,9 @@ function validateNewProduct(body) {
     if (typeof v !== "number" || Number.isNaN(v) || v <= 0) return `Dimension '${k}' must be a number > 0.`;
   }
 
-  if (typeof stock !== "number" || !Number.isInteger(stock) || stock < 0) return "Field 'stock' must be an integer >= 0.";
+  if (typeof stock !== "number" || !Number.isInteger(stock) || stock < 0) {
+    return "Field 'stock' must be an integer >= 0.";
+  }
 
   return null;
 }
@@ -69,7 +70,9 @@ function escapeHtml(str) {
 
 function productToHtml(product) {
   const reviews = Array.isArray(product.reviews) ? product.reviews : [];
-  const avg = reviews.length ? (reviews.reduce((a, b) => a + b, 0) / reviews.length).toFixed(2) : "N/A";
+  const avg = reviews.length
+    ? (reviews.reduce((a, b) => a + b, 0) / reviews.length).toFixed(2)
+    : "N/A";
 
   return `<!doctype html>
 <html>
@@ -94,11 +97,11 @@ function productToHtml(product) {
     <ul>
       <li><a href="/products/${product.id}">This product (HTML)</a></li>
       <li><a href="/reviews/${product.id}">This product's reviews (HTML)</a></li>
-      <li><a href="/products/${product.id}" onclick="event.preventDefault(); window.location='/products/${product.id}';">Refresh</a></li>
+      <li><a href="/index.html">Back to client</a></li>
     </ul>
 
-    <h2>Try JSON</h2>
-    <p>Use an <code>Accept: application/json</code> header, or open: <a href="/products/${product.id}?force=json">/products/${product.id}?force=json</a></p>
+    <h2>JSON representation</h2>
+    <p>Request this same URL with <code>Accept: application/json</code> (e.g., via fetch/Postman).</p>
   </div>
 </body>
 </html>`;
@@ -125,16 +128,16 @@ function reviewsToHtml(product) {
     <h1>Reviews for: ${escapeHtml(product.name)} (ID: ${product.id})</h1>
     <ul>${items}</ul>
     <p><a href="/products/${product.id}">Back to product</a></p>
-    <p>Try JSON with <code>Accept: application/json</code> or: <a href="/reviews/${product.id}?force=json">/reviews/${product.id}?force=json</a></p>
+    <p><a href="/index.html">Back to client</a></p>
+    <p>To retrieve JSON, request this same URL with <code>Accept: application/json</code>.</p>
   </div>
 </body>
 </html>`;
 }
 
-
 // --- Routes ---
 app.get("/", (req, res) => {
-  // This will normally be handled by /public/index.html, but keep a fallback:
+  // Handled by /public/index.html, but keep a fallback:
   res.send("Server running. Open /index.html for the client.");
 });
 
@@ -178,7 +181,7 @@ app.post("/products", (req, res) => {
 });
 
 /**
- * 3) Retrieve a product by ID, JSON or HTML
+ * 3) Retrieve a product by ID, JSON or HTML (via Accept header)
  * GET /products/:id
  */
 app.get("/products/:id", (req, res) => {
@@ -188,13 +191,6 @@ app.get("/products/:id", (req, res) => {
   const product = findProductById(id);
   if (!product) return res.status(404).json({ error: "Product not found." });
 
-  // Optional helper for browsers: ?force=json
-  const force = req.query.force;
-
-  if (force === "json") return res.json(product);
-  if (force === "html") return res.type("html").send(productToHtml(product));
-
-  // Content negotiation
   res.format({
     "application/json": () => res.json(product),
     "text/html": () => res.type("html").send(productToHtml(product)),
@@ -203,8 +199,8 @@ app.get("/products/:id", (req, res) => {
 });
 
 /**
- * 4) Add a review (rating 1-10)
- * POST /products/:id/reviews
+ * 4) Add a review (rating 1-10) for a product
+ * POST /reviews/:id
  * body: { "rating": 7 }
  */
 app.post("/reviews/:id", (req, res) => {
@@ -226,8 +222,8 @@ app.post("/reviews/:id", (req, res) => {
 });
 
 /**
- * 5) Get only reviews for a product, JSON or HTML
- * GET /products/:id/reviews
+ * 5) Get only reviews for a product, JSON or HTML (via Accept header)
+ * GET /reviews/:id
  */
 app.get("/reviews/:id", (req, res) => {
   const id = Number(req.params.id);
@@ -237,10 +233,6 @@ app.get("/reviews/:id", (req, res) => {
   if (!product) return res.status(404).json({ error: "Product not found." });
 
   const reviews = Array.isArray(product.reviews) ? product.reviews : [];
-
-  const force = req.query.force;
-  if (force === "json") return res.json({ productId: product.id, reviews });
-  if (force === "html") return res.type("html").send(reviewsToHtml(product));
 
   res.format({
     "application/json": () => res.json({ productId: product.id, reviews }),
