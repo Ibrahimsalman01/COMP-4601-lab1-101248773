@@ -28,12 +28,17 @@ const products = [
   {"name":"Small Metal Tuna","price":225,"dimensions":{"x":8,"y":10,"z":8},"stock":49,"id":14}
 ];
 
+// In-memory "orders" store (TODO: move this to MongoDB)
+const orders = [];
+let nextOrderId = 1;
+
 // --- Helpers ---
 function getNextId() {
   if (products.length === 0) return 0;
   return Math.max(...products.map(p => p.id)) + 1;
 }
 
+// Can be removed later? (atomic DB updates)
 function findProductById(id) {
   return products.find(p => p.id === id);
 }
@@ -57,6 +62,64 @@ function validateNewProduct(body) {
   }
 
   return null;
+}
+
+function validateOrderBody(body) {
+  const problems = [];
+
+  if (typeof body !== "object" || body === null) {
+    return { ok: false, problems: ["Body must be a JSON object."] };
+  }
+
+  const { customerName, items } = body;
+
+  if (typeof customerName !== "string" || customerName.trim().length === 0) {
+    problems.push("Missing purchaser name: 'customerName' must be a non-empty string.");
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    problems.push("Missing items: 'items' must be a non-empty array.");
+  } else {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (typeof it !== "object" || it === null) {
+        problems.push(`Item #${i + 1} must be an object.`);
+        continue;
+      }
+      const { productId, quantity } = it;
+      if (!Number.isInteger(productId)) problems.push(`Item #${i + 1}: 'productId' must be an integer.`);
+      if (!Number.isInteger(quantity) || quantity <= 0) problems.push(`Item #${i + 1}: 'quantity' must be an integer > 0.`);
+    }
+  }
+
+  return { ok: problems.length === 0, problems };
+}
+
+function checkOrderStockAndExistence(items) {
+  const problems = [];
+  const normalizedItems = [];
+
+  // Combine duplicates (same productId) to prevent double-decrement issues
+  const qtyByProductId = new Map();
+  for (const it of items) {
+    qtyByProductId.set(it.productId, (qtyByProductId.get(it.productId) || 0) + it.quantity);
+  }
+
+  for (const [productId, quantity] of qtyByProductId.entries()) {
+    const product = findProductById(productId);
+    if (!product) {
+      problems.push(`Product does not exist: productId=${productId}`);
+      continue;
+    }
+    if (product.stock < quantity) {
+      problems.push(
+        `Insufficient stock for productId=${productId} (${product.name}): requested=${quantity}, available=${product.stock}`
+      );
+      continue;
+    }
+    normalizedItems.push({ product, productId, quantity });
+  }
+  return { ok: problems.length === 0, problems, normalizedItems };
 }
 
 function escapeHtml(str) {
@@ -239,6 +302,86 @@ app.get("/reviews/:id", (req, res) => {
     "text/html": () => res.type("html").send(reviewsToHtml(product)),
     default: () => res.status(406).send("Not Acceptable. Use Accept: application/json or text/html."),
   });
+});
+
+
+
+/**
+ * - POST /orders: create a new order, validate, decrement stock, store order
+ * - GET /orders: list orders with links
+ * - GET /orders/:id: fetch a specific order
+ */
+
+// Create order
+app.post("/orders", (req, res) => {
+  const basic = validateOrderBody(req.body);
+  if (!basic.ok) {
+    return res.status(409).json({
+      error: "Invalid order",
+      problems: basic.problems,
+    });
+  }
+
+  const { customerName, items } = req.body;
+
+  const check = checkOrderStockAndExistence(items);
+  if (!check.ok) {
+    return res.status(409).json({
+      error: "Invalid order",
+      problems: check.problems,
+    });
+  }
+
+  // Decrement stock (in-memory "transaction").
+  // This method can be removed once we switch to MongoDB? (atomic DB updates)
+  for (const it of check.normalizedItems) {
+    it.product.stock -= it.quantity;
+  }
+
+  // Create order "receipt" snapshot
+  const orderId = nextOrderId++;
+  const order = {
+    id: orderId,
+    customerName: customerName.trim(),
+    createdAt: new Date().toISOString(),
+    items: check.normalizedItems.map(({ product, productId, quantity }) => ({
+      productId,
+      quantity,
+      unitPrice: product.price,
+      name: product.name,
+    })),
+    links: { self: `/orders/${orderId}` },
+  };
+
+  // TODO: Swap to MongoDB / OrderModel.create(order)
+  orders.push(order);
+
+  res.status(201)
+    .set("Location", order.links.self)
+    .json(order);
+});
+
+// List orders (include links to each order)
+app.get("/orders", (req, res) => {
+  const list = orders.map(o => ({
+    id: o.id,
+    customerName: o.customerName,
+    createdAt: o.createdAt,
+    links: o.links,
+  }));
+
+  res.json(list);
+});
+
+// Get a specific order
+app.get("/orders/:id", (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "Order id must be an integer." });
+
+  const order = orders.find(o => o.id === id);
+  if (!order) return res.status(404).json({ error: "Order not found." });
+
+  res.json(order);
 });
 
 app.listen(PORT, () => {
