@@ -14,4 +14,9 @@ async function connectDB() {
   return db;
 }
 
-module.exports = { connectDB };
+function productsCol() {
+  if (!db) throw new Error("DB not connected");
+  return db.collection("products");
+}
+
+module.exports = { connectDB, productsCol };
