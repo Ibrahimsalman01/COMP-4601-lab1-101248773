@@ -1,3 +1,6 @@
+require("dotenv").config();
+const { connectDB } = require("./db");
+
 const express = require("express");
 const path = require("path");
 
@@ -241,6 +244,17 @@ app.get("/reviews/:id", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+// Start the server after connecting to the database
+connectDB()
+  .then(() => {
+    console.log("Connected to the database.");
+
+    app.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("Failed to connect to MongoDB:", err);
+    process.exit(1);
+  });
+
