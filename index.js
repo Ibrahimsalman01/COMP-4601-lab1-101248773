@@ -172,7 +172,6 @@ app.post("/products", async (req, res) => {
 
   const newProduct = {
     ...req.body,
-    id,
     reviews: []
   };
   const result = await productsCol().insertOne(newProduct);
@@ -230,13 +229,15 @@ app.post("/reviews/:id", async (req, res) => {
       { returnDocument: "after" }
     );
 
-    if (!result.value) {
-      return res.status(404).json({ error: "Product not found." });
-    }
+  if (!result) {
+  console.log("Result:", result);  // Logs the entire result object
+  return res.status(404).json({ error: "Product not found." });
+  }
+
 
     res.status(201).json({
-      productId: _id,
-      reviews: result.value.reviews
+      productId: _id.toString(),
+      reviews: result.reviews
     });
   } catch (error) {
     return res.status(400).json({ error: "Invalid product ID format." });
@@ -260,7 +261,7 @@ app.get("/reviews/:id", async (req, res) => {
     const reviews = Array.isArray(product.reviews) ? product.reviews : [];
 
     res.format({
-      "application/json": () => res.json({ productId: _id, reviews }),
+      "application/json": () => res.json({ productId: _id.toString, reviews }),
       "text/html": () => res.type("html").send(reviewsToHtml(product)),
       default: () => res.status(406).send("Not Acceptable"),
     });
