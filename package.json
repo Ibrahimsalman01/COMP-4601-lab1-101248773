@@ -7,11 +7,23 @@
   },
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "1. Ibrahim Salman 2. Omar Khattab 3. Xuan Nguyen",
   "dependencies": {
-    "express": "^5.2.1"
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "mongodb": "^7.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ibrahimsalman01/COMP-4601-lab1-101248773.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Ibrahimsalman01/COMP-4601-lab1-101248773/issues"
+  },
+  "homepage": "https://github.com/Ibrahimsalman01/COMP-4601-lab1-101248773#readme"
 }

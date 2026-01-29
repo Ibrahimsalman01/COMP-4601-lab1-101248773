@@ -1,3 +1,7 @@
+require("dotenv").config();
+const { connectDB, productsCol } = require("./db");
+const { ObjectId } = require("mongodb");
+
 const express = require("express");
 const path = require("path");
 
@@ -9,7 +13,7 @@ app.use(express.json());
 // Serve the web client from /public
 app.use(express.static(path.join(__dirname, "public")));
 
-// In-memory "database" (will change in Lab 2)
+/* In-memory "database" (will change in Lab 2)
 const products = [
   {"name":"Tasty Cotton Chair","price":444,"dimensions":{"x":2,"y":4,"z":5},"stock":21,"id":0},
   {"name":"Small Concrete Towels","price":806,"dimensions":{"x":4,"y":7,"z":8},"stock":47,"id":1},
@@ -27,6 +31,7 @@ const products = [
   {"name":"Rustic Fresh Tuna","price":159,"dimensions":{"x":8,"y":6,"z":8},"stock":30,"id":13},
   {"name":"Small Metal Tuna","price":225,"dimensions":{"x":8,"y":10,"z":8},"stock":49,"id":14}
 ];
+*/
 
 // In-memory "orders" store (TODO: move this to MongoDB)
 const orders = [];
@@ -141,7 +146,7 @@ function productToHtml(product) {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Product ${product.id}</title>
+  <title>Product ${product._id}</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; }
     .card { border: 1px solid #ddd; padding: 16px; border-radius: 8px; max-width: 640px; }
@@ -150,7 +155,7 @@ function productToHtml(product) {
 </head>
 <body>
   <div class="card">
-    <h1>${escapeHtml(product.name)} <small>(ID: ${product.id})</small></h1>
+    <h1>${escapeHtml(product.name)} <small>(ID: ${product._id})</small></h1>
     <p><b>Price:</b> $${product.price}</p>
     <p><b>Stock:</b> ${product.stock}</p>
     <p><b>Dimensions:</b> x=${product.dimensions.x}, y=${product.dimensions.y}, z=${product.dimensions.z}</p>
@@ -158,8 +163,8 @@ function productToHtml(product) {
 
     <h2>Links</h2>
     <ul>
-      <li><a href="/products/${product.id}">This product (HTML)</a></li>
-      <li><a href="/reviews/${product.id}">This product's reviews (HTML)</a></li>
+      <li><a href="/products/${product._id}">This product (HTML)</a></li>
+      <li><a href="/reviews/${product._id}">This product's reviews (HTML)</a></li>
       <li><a href="/index.html">Back to client</a></li>
     </ul>
 
@@ -180,7 +185,7 @@ function reviewsToHtml(product) {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Reviews for Product ${product.id}</title>
+  <title>Reviews for Product ${product._id}</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; }
     .card { border: 1px solid #ddd; padding: 16px; border-radius: 8px; max-width: 640px; }
@@ -188,9 +193,9 @@ function reviewsToHtml(product) {
 </head>
 <body>
   <div class="card">
-    <h1>Reviews for: ${escapeHtml(product.name)} (ID: ${product.id})</h1>
+    <h1>Reviews for: ${escapeHtml(product.name)} (ID: ${product._id})</h1>
     <ul>${items}</ul>
-    <p><a href="/products/${product.id}">Back to product</a></p>
+    <p><a href="/products/${product._id}">Back to product</a></p>
     <p><a href="/index.html">Back to client</a></p>
     <p>To retrieve JSON, request this same URL with <code>Accept: application/json</code>.</p>
   </div>
@@ -208,101 +213,149 @@ app.get("/", (req, res) => {
  * 1) Search products by name and/or inStock/all
  * GET /products?name=chair&stock=inStock
  */
-app.get("/products", (req, res) => {
+app.get("/products", async (req, res) => {
   const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
   const stock = typeof req.query.stock === "string" ? req.query.stock : "all";
 
-  let results = [...products];
+  const filter = {};
 
-  if (name.length > 0) {
-    const q = name.toLowerCase();
-    results = results.filter(p => p.name.toLowerCase().includes(q));
+  if (name) {
+    filter.name = { $regex: name, $options: "i" };
   }
 
   if (stock === "inStock") {
-    results = results.filter(p => p.stock > 0);
+    filter.stock = { $gt: 0 };
   } else if (stock !== "all") {
-    return res.status(400).json({ error: "Invalid 'stock' value. Use 'all' or 'inStock'." });
+    return res.status(400).json({ error: "Invalid stock value." });
   }
 
-  res.json(results);
+  const products = await productsCol().find(filter).toArray();
+  res.json(products);
 });
+
 
 /**
  * 2) Create a new product
  * POST /products
  */
-app.post("/products", (req, res) => {
+app.post("/products", async (req, res) => {
   const err = validateNewProduct(req.body);
   if (err) return res.status(400).json({ error: err });
 
-  const id = getNextId();
-  const newProduct = { ...req.body, id, reviews: [] };
-  products.push(newProduct);
+  const newProduct = {
+    ...req.body,
+    reviews: []
+  };
+  const result = await productsCol().insertOne(newProduct);
 
-  res.status(201).json(newProduct);
+  const insertedProduct = {
+    _id: result.insertedId,
+    ...newProduct
+  };
+  
+  res.status(201).json(insertedProduct);
 });
+
 
 /**
  * 3) Retrieve a product by ID, JSON or HTML (via Accept header)
  * GET /products/:id
  */
-app.get("/products/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: "Product id must be an integer." });
+app.get("/products/:id", async (req, res) => {
+  try {
+    const _id = new ObjectId(req.params.id);
+    const product = await productsCol().findOne({ _id });
+    
+    if (!product) {
+      return res.status(404).json({ error: "Product not found." });
+    }
 
-  const product = findProductById(id);
-  if (!product) return res.status(404).json({ error: "Product not found." });
-
-  res.format({
-    "application/json": () => res.json(product),
-    "text/html": () => res.type("html").send(productToHtml(product)),
-    default: () => res.status(406).send("Not Acceptable. Use Accept: application/json or text/html."),
-  });
+    res.format({
+      "application/json": () => res.json(product),
+      "text/html": () => res.type("html").send(productToHtml(product)),
+      default: () => res.status(406).send("Not Acceptable"),
+    });
+  } catch (error) {
+    return res.status(400).json({ error: "Invalid product ID format." });
+  }
 });
+
 
 /**
  * 4) Add a review (rating 1-10) for a product
  * POST /reviews/:id
  * body: { "rating": 7 }
  */
-app.post("/reviews/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: "Product id must be an integer." });
+app.post("/reviews/:id", async (req, res) => {
+  try {
+    const _id = new ObjectId(req.params.id);
+    const rating = req.body?.rating;
+    
+    if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
+      return res.status(400).json({ error: "Rating must be 1–10." });
+    }
 
-  const product = findProductById(id);
-  if (!product) return res.status(404).json({ error: "Product not found." });
+    const result = await productsCol().findOneAndUpdate(
+      { _id },
+      { $push: { reviews: rating } },
+      { returnDocument: "after" }
+    );
 
-  const rating = req.body?.rating;
-  if (typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 10) {
-    return res.status(400).json({ error: "Field 'rating' must be an integer from 1 to 10." });
+  if (!result) {
+  console.log("Result:", result);  // Logs the entire result object
+  return res.status(404).json({ error: "Product not found." });
   }
 
-  if (!Array.isArray(product.reviews)) product.reviews = [];
-  product.reviews.push(rating);
 
-  res.status(201).json({ productId: product.id, reviews: product.reviews });
+    res.status(201).json({
+      productId: _id.toString(),
+      reviews: result.reviews
+    });
+  } catch (error) {
+    return res.status(400).json({ error: "Invalid product ID format." });
+  }
 });
+
 
 /**
  * 5) Get only reviews for a product, JSON or HTML (via Accept header)
  * GET /reviews/:id
  */
-app.get("/reviews/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: "Product id must be an integer." });
+app.get("/reviews/:id", async (req, res) => {
+  try {
+    const _id = new ObjectId(req.params.id);
+    const product = await productsCol().findOne({ _id });
+    
+    if (!product) {
+      return res.status(404).json({ error: "Product not found." });
+    }
 
-  const product = findProductById(id);
-  if (!product) return res.status(404).json({ error: "Product not found." });
+    const reviews = Array.isArray(product.reviews) ? product.reviews : [];
 
-  const reviews = Array.isArray(product.reviews) ? product.reviews : [];
-
-  res.format({
-    "application/json": () => res.json({ productId: product.id, reviews }),
-    "text/html": () => res.type("html").send(reviewsToHtml(product)),
-    default: () => res.status(406).send("Not Acceptable. Use Accept: application/json or text/html."),
-  });
+    res.format({
+      "application/json": () => res.json({ productId: _id.toString, reviews }),
+      "text/html": () => res.type("html").send(reviewsToHtml(product)),
+      default: () => res.status(406).send("Not Acceptable"),
+    });
+  } catch (error) {
+    return res.status(400).json({ error: "Invalid product ID format." });
+  }
 });
+
+
+// Start the server after connecting to the database
+connectDB()
+  .then(() => {
+    console.log("Connected to the database.");
+
+    app.listen(PORT, () => {
+      console.log(`Server listening on port ${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error("Failed to connect to MongoDB:", err);
+    process.exit(1);
+  });
 
 
 
