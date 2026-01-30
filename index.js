@@ -430,12 +430,15 @@ app.get("/:datasetName/popular", async (req, res) => {
       ])
       .toArray();
 
-    const result = top10.map(row => ({
-      url: row.page?._id
-        ? `${base}/${datasetName}/pages/${row.page._id.toString()}`
-        : `${base}/${datasetName}/pages/byUrl/${encodeURIComponent(row._id)}`, // fallback
-      origURL: row._id
-    }));
+    const result = top10.map(row => {
+      const origUrl = row._id; // original crawled URL string
+      return {
+        url: row.page?._id
+          ? `${base}/${datasetName}/pages/${row.page._id.toString()}`
+          : `${base}/${datasetName}/pages/byUrl/${encodeURIComponent(origUrl)}`,
+        origUrl
+      };
+    });
 
     res.json({ result });
   } catch (err) {
