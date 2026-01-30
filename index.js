@@ -480,7 +480,7 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
     const incomingLinks = [...new Set(incoming.map(x => x.from))];
 
     res.json({
-      webURL: page.url,
+      webUrl: page.url,
       incomingLinks
     });
   } catch (err) {
@@ -492,12 +492,12 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
 // Optional fallback if /popular couldn't find the page doc by _id
 app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   const datasetName = req.params.datasetName;
-  const webURL = decodeURIComponent(req.params.encodedUrl);
+  const webUrl = decodeURIComponent(req.params.encodedUrl);
 
   try {
     const incoming = await linksCol()
       .find(
-        { dataset: datasetName, to: webURL },
+        { dataset: datasetName, to: webUrl },
         { projection: { from: 1, _id: 0 } }
       )
       .toArray();
@@ -505,7 +505,7 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
     const incomingLinks = [...new Set(incoming.map(x => x.from))];
 
     res.json({
-      webURL,
+      webUrl,
       incomingLinks
     });
   } catch (err) {
