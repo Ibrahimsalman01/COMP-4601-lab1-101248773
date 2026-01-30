@@ -3,12 +3,17 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "nodemon index.js"
+    "start": "nodemon index.js",
+    "server": "node index.js",
+    "crawl": "node crawler.js",
+    "crawl:all": "node crawler.js all"
   },
   "author": "",
   "license": "ISC",
   "description": "1. Ibrahim Salman 2. Omar Khattab 3. Xuan Nguyen",
   "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "mongodb": "^7.0.0"

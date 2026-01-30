@@ -1,6 +1,10 @@
 const { MongoClient } = require("mongodb");
 
 const uri = process.env.MONGODB_URI;
+if (!uri) {
+  throw new Error("Missing MONGODB_URI in environment (.env).");
+}
+
 const client = new MongoClient(uri);
 
 let db;
@@ -24,4 +28,15 @@ function ordersCol() {
   return db.collection("orders");
 }
 
-module.exports = { connectDB, productsCol, ordersCol };
+// --- Lab 3 crawler collections ---
+function pagesCol() {
+  if (!db) throw new Error("DB not connected");
+  return db.collection("pages");
+}
+
+function linksCol() {
+  if (!db) throw new Error("DB not connected");
+  return db.collection("links");
+}
+
+module.exports = { connectDB, productsCol, ordersCol, pagesCol, linksCol };
