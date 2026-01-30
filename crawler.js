@@ -8,6 +8,7 @@ const DATASETS = {
   tinyfruits: "https://people.scs.carleton.ca/~avamckenney/tinyfruits/N-0.html",
   fruits100: "https://people.scs.carleton.ca/~avamckenney/fruits100/N-0.html",
   fruitsA: "https://people.scs.carleton.ca/~avamckenney/fruitsA/N-0.html",
+  fruitgraph: "https://people.scs.carleton.ca/~avamckenney/fruitgraph/N-0.html"
 };
 
 function normalizeUrl(u) {
@@ -71,7 +72,7 @@ async function crawlDataset(dataset) {
       outLinks = extractLinks(html, norm);
     } catch (e) {
       status = e.response?.status ?? 0;
-      // store failure (still counts as "attempted" for your dataset)
+      // store failure (still counts as "attempted" for the dataset)
       await pagesCol()
         .insertOne({
           dataset,
@@ -115,7 +116,6 @@ async function crawlDataset(dataset) {
         await linksCol().insertMany(edges, { ordered: false }).catch(err => {
           // ignore duplicate key bulk errors
           if (err?.code !== 11000 && err?.code !== 11001) {
-            // BulkWriteError can have other shapes; keep it simple
             // If it's dup keys, it's fine; otherwise throw.
             if (!String(err.message || "").includes("E11000")) throw err;
           }
@@ -135,7 +135,7 @@ async function crawlDataset(dataset) {
 async function main() {
   const arg = process.argv[2];
   if (!arg) {
-    console.log("Usage: node crawler.js <tinyfruits|fruits100|fruitsA|all>");
+    console.log("Usage: node crawler.js <tinyfruits|fruits100|fruitsA|fruitgraph|all>");
     process.exit(1);
   }
 
@@ -143,7 +143,8 @@ async function main() {
     for (const d of Object.keys(DATASETS)) {
       await crawlDataset(d);
     }
-  } else {
+  }
+  else {
     await crawlDataset(arg);
   }
 

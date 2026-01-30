@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { connectDB, productsCol, ordersCol } = require("./db");
+const { connectDB, productsCol, ordersCol, pagesCol, linksCol } = require("./db");
 const { ObjectId } = require("mongodb");
 
 const express = require("express");
@@ -376,6 +376,138 @@ app.get("/orders/:id", async (req, res) => {
     });
   } catch {
     return res.status(400).json({ error: "Invalid order ID format." });
+  }
+});
+
+/**
+ * 1) GET /:datasetName/popular
+ * 2) GET /:datasetName/pages/:pageId
+ */
+
+// Popular pages: top 10 by incoming link count
+app.get("/:datasetName/popular", async (req, res) => {
+  const datasetName = req.params.datasetName;
+
+  // Build absolute base so returned URLs work from anywhere
+  const base = `${req.protocol}://${req.get("host")}`;
+
+  try {
+    const top10 = await linksCol()
+      .aggregate([
+        { $match: { dataset: datasetName } },
+
+        // group by destination url
+        { $group: { _id: "$to", incomingCount: { $sum: 1 } } },
+
+        { $sort: { incomingCount: -1 } },
+        { $limit: 10 },
+
+        // join to pages to get the page document _id for this dataset+url
+        {
+          $lookup: {
+            from: "pages",
+            let: { toUrl: "$_id" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ["$dataset", datasetName] },
+                      { $eq: ["$url", "$$toUrl"] }
+                    ]
+                  }
+                }
+              },
+              { $project: { _id: 1, url: 1 } },
+              { $limit: 1 }
+            ],
+            as: "page"
+          }
+        },
+
+        // page might be missing if crawl failed to store it for some reason
+        { $unwind: { path: "$page", preserveNullAndEmptyArrays: true } }
+      ])
+      .toArray();
+
+    const result = top10.map(row => ({
+      url: row.page?._id
+        ? `${base}/${datasetName}/pages/${row.page._id.toString()}`
+        : `${base}/${datasetName}/pages/byUrl/${encodeURIComponent(row._id)}`, // fallback
+      origURL: row._id
+    }));
+
+    res.json({ result });
+  } catch (err) {
+    console.error("Error in /popular:", err);
+    res.status(500).json({ error: "Failed to compute popular pages." });
+  }
+});
+
+// Page details: original URL + list of incoming links
+app.get("/:datasetName/pages/:pageId", async (req, res) => {
+  const datasetName = req.params.datasetName;
+  const pageId = req.params.pageId;
+
+  try {
+    if (!ObjectId.isValid(pageId)) {
+      return res.status(400).json({ error: "Invalid page id." });
+    }
+
+    const _id = new ObjectId(pageId);
+
+    // Find the page doc to get its original crawled URL
+    const page = await pagesCol().findOne(
+      { _id, dataset: datasetName },
+      { projection: { url: 1 } }
+    );
+
+    if (!page) {
+      return res.status(404).json({ error: "Page not found." });
+    }
+
+    // Incoming links are link docs where `to` == this page's url
+    const incoming = await linksCol()
+      .find(
+        { dataset: datasetName, to: page.url },
+        { projection: { from: 1, _id: 0 } }
+      )
+      .toArray();
+
+    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+
+    res.json({
+      webURL: page.url,
+      incomingLinks
+    });
+  } catch (err) {
+    console.error("Error in /pages/:pageId:", err);
+    res.status(500).json({ error: "Failed to fetch page details." });
+  }
+});
+
+// Optional fallback if /popular couldn't find the page doc by _id
+app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
+  const datasetName = req.params.datasetName;
+  const webURL = decodeURIComponent(req.params.encodedUrl);
+
+  try {
+    const incoming = await linksCol()
+      .find(
+        { dataset: datasetName, to: webURL },
+        { projection: { from: 1, _id: 0 } }
+      )
+      .toArray();
+
+    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+
+    res.json({
+      webURL,
+      incomingLinks
+    });
+  } catch (err) {
+    console.error("Error in /pages/byUrl:", err);
+    res.status(500).json({ error: "Failed to fetch page details." });
   }
 });
 
