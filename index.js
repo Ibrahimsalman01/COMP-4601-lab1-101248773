@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { connectDB, productsCol } = require("./db");
+const { connectDB, productsCol, ordersCol } = require("./db");
 const { ObjectId } = require("mongodb");
 
 const express = require("express");
@@ -13,41 +13,7 @@ app.use(express.json());
 // Serve the web client from /public
 app.use(express.static(path.join(__dirname, "public")));
 
-/* In-memory "database" (will change in Lab 2)
-const products = [
-  {"name":"Tasty Cotton Chair","price":444,"dimensions":{"x":2,"y":4,"z":5},"stock":21,"id":0},
-  {"name":"Small Concrete Towels","price":806,"dimensions":{"x":4,"y":7,"z":8},"stock":47,"id":1},
-  {"name":"Small Metal Tuna","price":897,"dimensions":{"x":7,"y":4,"z":5},"stock":13,"id":2},
-  {"name":"Generic Fresh Chair","price":403,"dimensions":{"x":3,"y":8,"z":11},"stock":47,"id":3},
-  {"name":"Generic Steel Keyboard","price":956,"dimensions":{"x":3,"y":8,"z":6},"stock":8,"id":4},
-  {"name":"Refined Metal Bike","price":435,"dimensions":{"x":7,"y":5,"z":5},"stock":36,"id":5},
-  {"name":"Practical Steel Pizza","price":98,"dimensions":{"x":4,"y":7,"z":4},"stock":12,"id":6},
-  {"name":"Awesome Wooden Bike","price":36,"dimensions":{"x":11,"y":10,"z":10},"stock":3,"id":7},
-  {"name":"Licensed Cotton Keyboard","price":990,"dimensions":{"x":8,"y":7,"z":3},"stock":27,"id":8},
-  {"name":"Incredible Fresh Hat","price":561,"dimensions":{"x":6,"y":7,"z":5},"stock":28,"id":9},
-  {"name":"Tasty Cotton Soap","price":573,"dimensions":{"x":2,"y":6,"z":11},"stock":31,"id":10},
-  {"name":"Intelligent Metal Mouse","price":3,"dimensions":{"x":4,"y":5,"z":10},"stock":0,"id":11},
-  {"name":"Practical Plastic Ball","price":11,"dimensions":{"x":11,"y":9,"z":11},"stock":25,"id":12},
-  {"name":"Rustic Fresh Tuna","price":159,"dimensions":{"x":8,"y":6,"z":8},"stock":30,"id":13},
-  {"name":"Small Metal Tuna","price":225,"dimensions":{"x":8,"y":10,"z":8},"stock":49,"id":14}
-];
-*/
-
-// In-memory "orders" store (TODO: move this to MongoDB)
-const orders = [];
-let nextOrderId = 1;
-
 // --- Helpers ---
-function getNextId() {
-  if (products.length === 0) return 0;
-  return Math.max(...products.map(p => p.id)) + 1;
-}
-
-// Can be removed later? (atomic DB updates)
-function findProductById(id) {
-  return products.find(p => p.id === id);
-}
-
 function validateNewProduct(body) {
   if (typeof body !== "object" || body === null) return "Body must be a JSON object.";
 
@@ -67,64 +33,6 @@ function validateNewProduct(body) {
   }
 
   return null;
-}
-
-function validateOrderBody(body) {
-  const problems = [];
-
-  if (typeof body !== "object" || body === null) {
-    return { ok: false, problems: ["Body must be a JSON object."] };
-  }
-
-  const { customerName, items } = body;
-
-  if (typeof customerName !== "string" || customerName.trim().length === 0) {
-    problems.push("Missing purchaser name: 'customerName' must be a non-empty string.");
-  }
-
-  if (!Array.isArray(items) || items.length === 0) {
-    problems.push("Missing items: 'items' must be a non-empty array.");
-  } else {
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (typeof it !== "object" || it === null) {
-        problems.push(`Item #${i + 1} must be an object.`);
-        continue;
-      }
-      const { productId, quantity } = it;
-      if (!Number.isInteger(productId)) problems.push(`Item #${i + 1}: 'productId' must be an integer.`);
-      if (!Number.isInteger(quantity) || quantity <= 0) problems.push(`Item #${i + 1}: 'quantity' must be an integer > 0.`);
-    }
-  }
-
-  return { ok: problems.length === 0, problems };
-}
-
-function checkOrderStockAndExistence(items) {
-  const problems = [];
-  const normalizedItems = [];
-
-  // Combine duplicates (same productId) to prevent double-decrement issues
-  const qtyByProductId = new Map();
-  for (const it of items) {
-    qtyByProductId.set(it.productId, (qtyByProductId.get(it.productId) || 0) + it.quantity);
-  }
-
-  for (const [productId, quantity] of qtyByProductId.entries()) {
-    const product = findProductById(productId);
-    if (!product) {
-      problems.push(`Product does not exist: productId=${productId}`);
-      continue;
-    }
-    if (product.stock < quantity) {
-      problems.push(
-        `Insufficient stock for productId=${productId} (${product.name}): requested=${quantity}, available=${product.stock}`
-      );
-      continue;
-    }
-    normalizedItems.push({ product, productId, quantity });
-  }
-  return { ok: problems.length === 0, problems, normalizedItems };
 }
 
 function escapeHtml(str) {
@@ -301,10 +209,10 @@ app.post("/reviews/:id", async (req, res) => {
       { returnDocument: "after" }
     );
 
-  if (!result) {
-  console.log("Result:", result);  // Logs the entire result object
-  return res.status(404).json({ error: "Product not found." });
-  }
+    if (!result) {
+      console.log("Result:", result);  // Logs the entire result object
+      return res.status(404).json({ error: "Product not found." });
+    }
 
 
     res.status(201).json({
@@ -342,12 +250,58 @@ app.get("/reviews/:id", async (req, res) => {
   }
 });
 
+// POST /orders: create a new order, validate, decrement stock, store order
+app.post("/orders", async (req, res) => {
+  const { customerName, items } = req.body;
+  
+  if (!customerName) return res.status(409).json({ error: "Customer name missing." });
+  
+  const validatedItems = [];
+  for (const item of items) {
+    const _id = new ObjectId(item.productId);
+    const product = await productsCol().findOne({ _id });
+    
+    if (!product) return res.status(409).json({ error: "Product does not exist." });
+    if (item.quantity <= 0) {
+      return res.status(409).json({ error: "Invalid quantity amount. Must be from 1 to the item stock, if item is still in stock." }); 
+    } else if (item.quantity > product.stock) {
+      return res.status(409).json({ error: "Quantity for product(s) is greater than current stock." });
+    }
+  
+    validatedItems.push({ _id, productStock: product.stock, itemQuantity: item.quantity });
+  }
+
+  for (const validatedItem of validatedItems) {
+    await productsCol().updateOne(
+      { _id: validatedItem._id },
+      { $set: { stock: validatedItem.productStock - validatedItem.itemQuantity } }
+    );
+    await ordersCol().insertOne({ ...req.body });
+  }
+
+  return res.status(201).json({ message: "Order successfully placed." });
+});
+
+// GET /orders
+app.get("/orders", async (req, res) => {
+  const orders = await ordersCol().find().toArray();
+  res.json(orders);
+});
+
+// GET /orders/:id
+app.get("/orders/:id", async (req, res) => {
+  const _id = new ObjectId(req.params.id);
+
+  const order = await ordersCol().findOne({ _id });
+  if (!order) return res.status(404).json({ error: "Order not found." });
+
+  res.json(order);
+});
+
 
 // Start the server after connecting to the database
 connectDB()
   .then(() => {
-    console.log("Connected to the database.");
-
     app.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });
@@ -356,87 +310,3 @@ connectDB()
     console.error("Failed to connect to MongoDB:", err);
     process.exit(1);
   });
-
-
-
-/**
- * - POST /orders: create a new order, validate, decrement stock, store order
- * - GET /orders: list orders with links
- * - GET /orders/:id: fetch a specific order
- */
-
-// Create order
-app.post("/orders", (req, res) => {
-  const basic = validateOrderBody(req.body);
-  if (!basic.ok) {
-    return res.status(409).json({
-      error: "Invalid order",
-      problems: basic.problems,
-    });
-  }
-
-  const { customerName, items } = req.body;
-
-  const check = checkOrderStockAndExistence(items);
-  if (!check.ok) {
-    return res.status(409).json({
-      error: "Invalid order",
-      problems: check.problems,
-    });
-  }
-
-  // Decrement stock (in-memory "transaction").
-  // This method can be removed once we switch to MongoDB? (atomic DB updates)
-  for (const it of check.normalizedItems) {
-    it.product.stock -= it.quantity;
-  }
-
-  // Create order "receipt" snapshot
-  const orderId = nextOrderId++;
-  const order = {
-    id: orderId,
-    customerName: customerName.trim(),
-    createdAt: new Date().toISOString(),
-    items: check.normalizedItems.map(({ product, productId, quantity }) => ({
-      productId,
-      quantity,
-      unitPrice: product.price,
-      name: product.name,
-    })),
-    links: { self: `/orders/${orderId}` },
-  };
-
-  // TODO: Swap to MongoDB / OrderModel.create(order)
-  orders.push(order);
-
-  res.status(201)
-    .set("Location", order.links.self)
-    .json(order);
-});
-
-// List orders (include links to each order)
-app.get("/orders", (req, res) => {
-  const list = orders.map(o => ({
-    id: o.id,
-    customerName: o.customerName,
-    createdAt: o.createdAt,
-    links: o.links,
-  }));
-
-  res.json(list);
-});
-
-// Get a specific order
-app.get("/orders/:id", (req, res) => {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: "Order id must be an integer." });
-
-  const order = orders.find(o => o.id === id);
-  if (!order) return res.status(404).json({ error: "Order not found." });
-
-  res.json(order);
-});
-
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
