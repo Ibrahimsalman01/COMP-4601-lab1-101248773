@@ -11,4 +11,4 @@
 
 ### URL for your demonstration video
 - Lab 1: https://youtu.be/KWLnjJhJAnI
-- Lab 2: 
+- Lab 2: https://youtu.be/ZEfjANnt7Eo
