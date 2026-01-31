@@ -387,8 +387,6 @@ app.get("/orders/:id", async (req, res) => {
 // Popular pages: top 10 by incoming link count
 app.get("/:datasetName/popular", async (req, res) => {
   const datasetName = req.params.datasetName;
-
-  // Build absolute base so returned URLs work from anywhere
   const base = `${req.protocol}://${req.get("host")}`;
 
   try {
@@ -396,10 +394,15 @@ app.get("/:datasetName/popular", async (req, res) => {
       .aggregate([
         { $match: { dataset: datasetName } },
 
-        // group by destination url
-        { $group: { _id: "$to", incomingCount: { $sum: 1 } } },
+        // exclude self-links
+        { $match: { $expr: { $ne: ["$from", "$to"] } } },
 
-        { $sort: { incomingCount: -1 } },
+        // unique incoming sources (dedupe by from->to)
+        { $group: { _id: { to: "$to", from: "$from" } } },
+        { $group: { _id: "$_id.to", incomingCount: { $sum: 1 } } },
+
+        // deterministic ordering
+        { $sort: { incomingCount: -1, _id: 1 } },
         { $limit: 10 },
 
         // join to pages to get the page document _id for this dataset+url
@@ -413,30 +416,28 @@ app.get("/:datasetName/popular", async (req, res) => {
                   $expr: {
                     $and: [
                       { $eq: ["$dataset", datasetName] },
-                      { $eq: ["$url", "$$toUrl"] }
-                    ]
-                  }
-                }
+                      { $eq: ["$url", "$$toUrl"] },
+                    ],
+                  },
+                },
               },
               { $project: { _id: 1, url: 1 } },
-              { $limit: 1 }
+              { $limit: 1 },
             ],
-            as: "page"
-          }
+            as: "page",
+          },
         },
-
-        // page might be missing if crawl failed to store it for some reason
-        { $unwind: { path: "$page", preserveNullAndEmptyArrays: true } }
+        { $unwind: { path: "$page", preserveNullAndEmptyArrays: true } },
       ])
       .toArray();
 
-    const result = top10.map(row => {
-      const origUrl = row._id; // original crawled URL string
+    const result = top10.map((row) => {
+      const origUrl = row._id;
       return {
         url: row.page?._id
           ? `${base}/${datasetName}/pages/${row.page._id.toString()}`
           : `${base}/${datasetName}/pages/byUrl/${encodeURIComponent(origUrl)}`,
-        origUrl
+        origUrl,
       };
     });
 

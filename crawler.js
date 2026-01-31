@@ -20,9 +20,9 @@ function normalizeUrl(u) {
   return s;
 }
 
-function baseDirFromSeed(seed) {
-  // seed ends with N-0.html; use directory as dataset boundary
-  return seed.substring(0, seed.lastIndexOf("/") + 1);
+function siteRootFromSeed(seed) {
+  const u = new URL(seed);
+  return `${u.origin}/~avamckenney/`;
 }
 
 function extractLinks(html, baseUrl) {
@@ -49,7 +49,7 @@ async function crawlDataset(dataset) {
   await connectDB();
   await ensureIndexes();
 
-  const baseDir = baseDirFromSeed(seed);
+  const siteRoot = siteRootFromSeed(seed);
 
   const queue = [seed];
   const seen = new Set();
@@ -59,6 +59,10 @@ async function crawlDataset(dataset) {
     if (!url) continue;
 
     const norm = normalizeUrl(url);
+
+    // hard boundary: only crawl within the subtree
+    if (!norm.startsWith(siteRoot)) continue;
+
     if (seen.has(norm)) continue;
     seen.add(norm);
 
@@ -83,56 +87,63 @@ async function crawlDataset(dataset) {
     let outLinks = [];
 
     try {
-      const res = await axios.get(norm, { timeout: 20000 }); // slightly higher timeout
+      const res = await axios.get(norm, { timeout: 20000 });
       status = res.status;
       html = typeof res.data === "string" ? res.data : String(res.data);
       outLinks = extractLinks(html, norm);
     } catch (e) {
       status = e.response?.status ?? 0;
 
-      await pagesCol().insertOne({
-        dataset,
-        url: norm,
-        status,
-        html: null,
-        outLinks: [],
-        fetchedAt: new Date(),
-        error: String(e.message),
-      }).catch(err => {
-        if (err?.code !== 11000) throw err;
-      });
+      await pagesCol()
+        .insertOne({
+          dataset,
+          url: norm,
+          status,
+          html: null,
+          outLinks: [],
+          fetchedAt: new Date(),
+          error: String(e.message),
+        })
+        .catch((err) => {
+          if (err?.code !== 11000) throw err;
+        });
 
       continue;
     }
 
+    // Keep only links in the subtree
+    const withinSite = outLinks.filter((to) => to.startsWith(siteRoot));
+
     // Store page content + outgoing links
-    await pagesCol().insertOne({
-      dataset,
-      url: norm,
-      status,
-      html,
-      outLinks,
-      fetchedAt: new Date(),
-    }).catch(err => {
-      if (err?.code !== 11000) throw err;
-    });
+    await pagesCol()
+      .insertOne({
+        dataset,
+        url: norm,
+        status,
+        html,
+        outLinks: withinSite,
+        fetchedAt: new Date(),
+      })
+      .catch((err) => {
+        if (err?.code !== 11000) throw err;
+      });
 
-    // Store network edges
-    if (outLinks.length) {
-      const edges = outLinks
-        .filter(to => to.startsWith(baseDir))
-        .map(to => ({ dataset, from: norm, to }));
+    // Store network edges (exclude self-links)
+    const edges = withinSite
+      .filter((to) => to !== norm)
+      .map((to) => ({ dataset, from: norm, to }));
 
-      if (edges.length) {
-        await linksCol().insertMany(edges, { ordered: false }).catch(err => {
+    if (edges.length) {
+      await linksCol()
+        .insertMany(edges, { ordered: false })
+        .catch((err) => {
           if (!String(err?.message || "").includes("E11000")) throw err;
         });
-      }
     }
 
-    // BFS enqueue discovered links within the dataset directory
-    for (const link of outLinks) {
-      if (link.startsWith(baseDir)) queue.push(link);
+    // BFS enqueue discovered links within siteRoot
+    for (const link of withinSite) {
+      if (link !== norm) queue.push(link);
     }
   }
 
@@ -150,15 +161,14 @@ async function main() {
     for (const d of Object.keys(DATASETS)) {
       await crawlDataset(d);
     }
-  }
-  else {
+  } else {
     await crawlDataset(arg);
   }
 
   process.exit(0);
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
