@@ -12,7 +12,12 @@ const DATASETS = {
 };
 
 function normalizeUrl(u) {
-  return u.split("#")[0];
+  const url = new URL(u);
+  url.hash = "";
+  url.protocol = "https:"; // unify http/https if any appear
+  let s = url.toString();
+  if (s.endsWith("/")) s = s.slice(0, -1);
+  return s;
 }
 
 function baseDirFromSeed(seed) {
@@ -47,7 +52,7 @@ async function crawlDataset(dataset) {
   const baseDir = baseDirFromSeed(seed);
 
   const queue = [seed];
-  const seen = new Set(); // optimization; DB unique index is the hard guarantee
+  const seen = new Set();
 
   while (queue.length) {
     const url = queue.shift();
@@ -57,53 +62,60 @@ async function crawlDataset(dataset) {
     if (seen.has(norm)) continue;
     seen.add(norm);
 
-    // Avoid recrawl across reruns
-    const already = await pagesCol().findOne({ dataset, url: norm }, { projection: { _id: 1 } });
-    if (already) continue;
+    // Skip only if we previously fetched successfully
+    const existing = await pagesCol().findOne(
+      { dataset, url: norm },
+      { projection: { _id: 1, status: 1, html: 1 } }
+    );
+
+    if (existing && existing.status === 200 && existing.html) {
+      continue;
+    }
+
+    // If it exists but was a failure, delete it and its outgoing edges so we can retry cleanly
+    if (existing) {
+      await pagesCol().deleteOne({ dataset, url: norm });
+      await linksCol().deleteMany({ dataset, from: norm });
+    }
 
     let status = 0;
     let html = null;
     let outLinks = [];
 
     try {
-      const res = await axios.get(norm, { timeout: 10000 });
+      const res = await axios.get(norm, { timeout: 20000 }); // slightly higher timeout
       status = res.status;
       html = typeof res.data === "string" ? res.data : String(res.data);
       outLinks = extractLinks(html, norm);
     } catch (e) {
       status = e.response?.status ?? 0;
-      // store failure (still counts as "attempted" for the dataset)
-      await pagesCol()
-        .insertOne({
-          dataset,
-          url: norm,
-          status,
-          html: null,
-          outLinks: [],
-          fetchedAt: new Date(),
-          error: String(e.message),
-        })
-        .catch(err => {
-          // ignore dup key errors
-          if (err?.code !== 11000) throw err;
-        });
+
+      await pagesCol().insertOne({
+        dataset,
+        url: norm,
+        status,
+        html: null,
+        outLinks: [],
+        fetchedAt: new Date(),
+        error: String(e.message),
+      }).catch(err => {
+        if (err?.code !== 11000) throw err;
+      });
 
       continue;
     }
 
     // Store page content + outgoing links
-    await pagesCol()
-      .insertOne({
-        dataset,
-        url: norm,
-        status,
-        html,
-        outLinks,
-        fetchedAt: new Date(),
-      })
-      .catch(err => {
-        if (err?.code !== 11000) throw err;
-      });
+    await pagesCol().insertOne({
+      dataset,
+      url: norm,
+      status,
+      html,
+      outLinks,
+      fetchedAt: new Date(),
+    }).catch(err => {
+      if (err?.code !== 11000) throw err;
+    });
 
     // Store network edges
     if (outLinks.length) {
@@ -112,18 +124,13 @@ async function crawlDataset(dataset) {
         .map(to => ({ dataset, from: norm, to }));
 
       if (edges.length) {
-        // insertMany ordered:false so duplicates don't stop batch
         await linksCol().insertMany(edges, { ordered: false }).catch(err => {
-          // ignore duplicate key bulk errors
-          if (err?.code !== 11000 && err?.code !== 11001) {
-            // If it's dup keys, it's fine; otherwise throw.
-            if (!String(err.message || "").includes("E11000")) throw err;
-          }
+          if (!String(err?.message || "").includes("E11000")) throw err;
         });
       }
     }
 
-    // BFS: enqueue discovered links within the dataset directory
+    // BFS enqueue discovered links within the dataset directory
     for (const link of outLinks) {
       if (link.startsWith(baseDir)) queue.push(link);
     }
