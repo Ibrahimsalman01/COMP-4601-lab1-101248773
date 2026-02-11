@@ -110,12 +110,6 @@ function reviewsToHtml(product) {
 }
 
 // --- Routes ---
-
-// INFO test
-app.get("/info", (req, res) => {
-  res.json({ name: process.env.SERVER_NAME || "BernardBilberry2067" });
-});
-
 app.get("/", (req, res) => {
   res.send("Server running. Open /index.html for the client.");
 });
@@ -382,6 +376,7 @@ app.get("/orders/:id", async (req, res) => {
 /**
  * 1) GET /:datasetName/popular
  * 2) GET /:datasetName/pages/:pageId
+ * 3) GET /:datasetName?q="searched phrase"
  */
 
 // Popular pages: top 10 by incoming link count
@@ -513,6 +508,115 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
     console.error("Error in /pages/byUrl:", err);
     res.status(500).json({ error: "Failed to fetch page details." });
   }
+});
+
+
+function log2(x) {
+  return Math.log(x) / Math.log(2);
+}
+
+function tokenizeText(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+app.get("/:datasetName", async (req, res) => {
+  const datasetName = req.params.datasetName;
+
+  // Only handle requests that actually include q=...
+  if (!("q" in req.query)) {
+    return res.status(404).json({ error: "Not Found" });
+  }
+
+  let q = typeof req.query.q === "string" ? req.query.q : "";
+  q = q.trim();
+
+  // Handle q="..." by stripping surrounding quotes if present
+  if (q.length >= 2 && ((q.startsWith('"') && q.endsWith('"')) || (q.startsWith("“") && q.endsWith("”")))) {
+    q = q.slice(1, -1).trim();
+  }
+
+  const queryTokens = tokenizeText(q);
+  if (queryTokens.length === 0) {
+    return res.json({ result: [] });
+  }
+
+  // Query term counts
+  const qCounts = {};
+  for (const t of queryTokens) qCounts[t] = (qCounts[t] || 0) + 1;
+
+  const queryTerms = Object.keys(qCounts); // unique terms
+  const qWordCount = queryTokens.length;
+
+  // Load all docs for this dataset (only successful pages with words)
+  const pages = await pagesCol()
+    .find(
+      { dataset: datasetName, status: 200, wordCount: { $gt: 0 } },
+      { projection: { url: 1, termFreq: 1, wordCount: 1 } }
+    )
+    .toArray();
+
+  const totalDocs = pages.length;
+  if (totalDocs === 0) {
+    return res.json({ result: [] });
+  }
+
+  // DF for each query term = number of docs containing term
+  const df = {};
+  for (const t of queryTerms) df[t] = 0;
+
+  for (const p of pages) {
+    const tfMap = p.termFreq || {};
+    for (const t of queryTerms) {
+      if ((tfMap[t] || 0) > 0) df[t] += 1;
+    }
+  }
+
+  // IDF per term: log2(totalDocs / (1 + df)), bounded to never < 0
+  const idf = {};
+  for (const t of queryTerms) {
+    idf[t] = Math.max(0, log2(totalDocs / (1 + df[t])));
+  }
+
+  // Query vector (TF uses query length)
+  const qVec = queryTerms.map((t) => {
+    const tf = (qCounts[t] || 0) / qWordCount;            // TF
+    return log2(1 + tf) * idf[t];                         // TF-IDF
+  });
+
+  // Score each doc with cosine similarity (vector space model)
+  const results = pages.map((p) => {
+    const tfMap = p.termFreq || {};
+    const wc = p.wordCount || 0;
+
+    const dVec = queryTerms.map((t) => {
+      const count = tfMap[t] || 0;
+      const tf = wc > 0 ? (count / wc) : 0;               // TF
+      return log2(1 + tf) * idf[t];                       // TF-IDF
+    });
+
+    const score = cosineSimilarity(qVec, dVec);
+    return { url: p.url, score };
+  });
+
+  // Sort by score desc; deterministic tie-break by url asc
+  results.sort((a, b) => (b.score - a.score) || a.url.localeCompare(b.url));
+
+  res.json({ result: results.slice(0, 10) });
 });
 
 // Start the server after connecting to the database

@@ -15,13 +15,12 @@ const DATASETS = {
 function normalizeUrl(u) {
   const url = new URL(u);
   url.hash = "";
-  url.protocol = "https:"; // unify http/https
+  url.protocol = "https:";
   let s = url.toString();
   if (s.endsWith("/")) s = s.slice(0, -1);
   return s;
 }
 
-// Dataset crawl boundary should be the instructor subtree: https://people.scs.carleton.ca/~avamckenney/
 function siteRootFromSeed(seed) {
   const u = new URL(seed);
   return `${u.origin}/~avamckenney/`;
@@ -41,6 +40,34 @@ function extractLinksFromCheerio($, baseUrl) {
   return [...new Set(out)];
 }
 
+// Words come ONLY from <p> paragraphs, excluding link text.
+function extractParagraphIndexFromCheerio($) {
+  const paragraphText = $("p")
+    .map((_, p) => {
+      const clean = $(p).clone();
+      clean.find("a").remove(); // exclude link text explicitly
+      return clean.text();
+    })
+    .get()
+    .join(" ");
+
+  const tokens = paragraphText
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const termFreq = {};
+  for (const t of tokens) termFreq[t] = (termFreq[t] || 0) + 1;
+
+  return { paragraphText, termFreq, wordCount: tokens.length };
+}
+
+function enqueue(c, url) {
+  if (typeof c.add === "function") return c.add({ url });
+  return c.queue({ uri: url });
+}
+
 async function ensureIndexes() {
   await pagesCol().createIndex({ dataset: 1, url: 1 }, { unique: true });
   await linksCol().createIndex({ dataset: 1, from: 1, to: 1 }, { unique: true });
@@ -56,22 +83,25 @@ async function crawlDataset(dataset) {
   const siteRoot = siteRootFromSeed(seed);
   const seen = new Set();
 
-  // Wrap crawler completion in a Promise that resolves on drain
   await new Promise((resolve, reject) => {
     const c = new Crawler({
       maxConnections: 10,
-      rateLimit: 0,
       timeout: 20000,
       retries: 1,
       retryInterval: 1000,
-      // Cheerio enabled by default; res.$ is available :contentReference[oaicite:2]{index=2}
+
       callback: async (error, res, done) => {
         try {
-          const url = normalizeUrl(res.options.url);
+          // node-crawler may store URL in options.url or options.uri depending on version
+          const rawUrl = res?.options?.url ?? res?.options?.uri;
+          if (!rawUrl) return;
+
+          const url = normalizeUrl(rawUrl);
 
           // Hard boundary
           if (!url.startsWith(siteRoot)) return;
 
+          // De-dupe
           if (seen.has(url)) return;
           seen.add(url);
 
@@ -85,6 +115,9 @@ async function crawlDataset(dataset) {
                   status: 0,
                   html: null,
                   outLinks: [],
+                  paragraphText: "",
+                  termFreq: {},
+                  wordCount: 0,
                   fetchedAt: new Date(),
                   error: String(error.message || error),
                 },
@@ -102,13 +135,17 @@ async function crawlDataset(dataset) {
               ? res.body.toString("utf8")
               : String(res.body ?? "");
 
-          // Only proceed on successful HTML fetch
           let outLinks = [];
+          let paragraphText = "";
+          let termFreq = {};
+          let wordCount = 0;
+
           if (status === 200 && res.$) {
             outLinks = extractLinksFromCheerio(res.$, url).filter((to) => to.startsWith(siteRoot));
+            ({ paragraphText, termFreq, wordCount } = extractParagraphIndexFromCheerio(res.$));
           }
 
-          // Store page
+          // Store page (including paragraph-only index fields)
           await pagesCol().updateOne(
             { dataset, url },
             {
@@ -118,6 +155,9 @@ async function crawlDataset(dataset) {
                 status,
                 html: status === 200 ? body : null,
                 outLinks,
+                paragraphText,
+                termFreq,
+                wordCount,
                 fetchedAt: new Date(),
               },
             },
@@ -134,23 +174,19 @@ async function crawlDataset(dataset) {
               await linksCol()
                 .insertMany(edges, { ordered: false })
                 .catch((err) => {
-                  // ignore dup key errors from unique index
                   if (!String(err?.message || "").includes("E11000")) throw err;
                 });
             }
 
-            // Enqueue discovered links (BFS-ish)
+            // Enqueue discovered links
             for (const link of outLinks) {
-              if (!seen.has(link) && link.startsWith(siteRoot)) {
-                // contentReference[oaicite:3]{index=3}
-                c.add({ url: link });
-              }
+              if (!seen.has(link) && link.startsWith(siteRoot)) enqueue(c, link);
             }
           }
         } catch (e) {
           reject(e);
         } finally {
-          done(); // must be called :contentReference[oaicite:4]{index=4}
+          done();
         }
       },
     });
@@ -158,8 +194,7 @@ async function crawlDataset(dataset) {
     c.on("drain", resolve);
     c.on("error", reject);
 
-    // Start crawl
-    c.add({ url: seed });
+    enqueue(c, seed);
   });
 
   console.log(`Done crawling dataset: ${dataset}`);
@@ -173,9 +208,7 @@ async function main() {
   }
 
   if (arg === "all") {
-    for (const d of Object.keys(DATASETS)) {
-      await crawlDataset(d);
-    }
+    for (const d of Object.keys(DATASETS)) await crawlDataset(d);
   } else {
     await crawlDataset(arg);
   }
