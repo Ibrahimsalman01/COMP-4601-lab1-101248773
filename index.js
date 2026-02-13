@@ -110,12 +110,6 @@ function reviewsToHtml(product) {
 }
 
 // --- Routes ---
-
-// INFO test
-app.get("/info", (req, res) => {
-  res.json({ name: process.env.SERVER_NAME || "BernardBilberry2067" });
-});
-
 app.get("/", (req, res) => {
   res.send("Server running. Open /index.html for the client.");
 });
@@ -382,6 +376,7 @@ app.get("/orders/:id", async (req, res) => {
 /**
  * 1) GET /:datasetName/popular
  * 2) GET /:datasetName/pages/:pageId
+ * 3) GET /:datasetName?q="searched phrase"
  */
 
 // Popular pages: top 10 by incoming link count
