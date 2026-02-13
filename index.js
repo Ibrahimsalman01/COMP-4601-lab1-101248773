@@ -616,9 +616,6 @@ app.get('/:datasetName', async (req, res) => {
   }
 });
 
-
-
-
 // Start the server after connecting to the database
 connectDB()
   .then(() => {
