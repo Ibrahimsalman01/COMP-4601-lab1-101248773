@@ -515,6 +515,110 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   }
 });
 
+app.get('/:datasetName', async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+
+    if (!req.query.q) {
+      return res.status(400).json({ error: "Missing query parameter q" });
+    }
+
+    const dataset = await pagesCol()
+      .find({ dataset: datasetName })
+      .toArray();
+
+    if (!dataset.length) {
+      return res.status(404).json({ error: "Dataset not found" });
+    }
+
+    
+    const documentFrequency = {};
+    for (const page of dataset) {
+      for (const word of Object.keys(page.termFreq)) {
+        documentFrequency[word] = (documentFrequency[word] || 0) + 1;
+      }
+    }
+    
+    const idf = {};
+    const totalDocuments = dataset.length;
+    for (const [word, df] of Object.entries(documentFrequency)) {
+      idf[word] = Math.max(
+        0,
+        Math.log2(totalDocuments / (1 + df))
+      );
+    }
+
+    const rawQueryWords = req.query.q
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(w => w.length > 0);
+
+    const queryLength = rawQueryWords.length;
+
+    const queryFrequency = {};
+    for (const word of rawQueryWords) {
+      queryFrequency[word] = (queryFrequency[word] || 0) + 1;
+    }
+
+    const vocabulary = Object.keys(queryFrequency)
+      .filter(word => idf[word] > 0);
+
+    const queryVector = [];
+    let queryMagSquared = 0;
+    for (const word of vocabulary) {
+      const tf = queryFrequency[word] / queryLength;
+      const tfidf = Math.log2(1 + tf) * idf[word];
+      queryVector.push(tfidf);
+      queryMagSquared += tfidf * tfidf;
+    }
+
+    const queryMagnitude = Math.sqrt(queryMagSquared);
+    const results = [];
+    for (const page of dataset) {
+
+      let dot = 0;
+      let pageMagSquared = 0;
+
+      for (let i = 0; i < vocabulary.length; i++) {
+
+        const word = vocabulary[i];
+
+        const freq = page.termFreq[word] || 0;
+        const tf = freq / page.wordCount;
+        const tfidf = Math.log2(1 + tf) * idf[word];
+
+        dot += tfidf * queryVector[i];
+        pageMagSquared += tfidf * tfidf;
+      }
+
+      const pageMagnitude = Math.sqrt(pageMagSquared);
+
+      const score =
+        pageMagnitude === 0 || queryMagnitude === 0
+          ? 0
+          : dot / (pageMagnitude * queryMagnitude);
+
+      results.push({
+        url: page.url,
+        score
+      });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+
+    res.json({
+      results: results.slice(0, 10)
+    });
+
+  } catch (err) {
+    console.error("Search error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+
 // Start the server after connecting to the database
 connectDB()
   .then(() => {
