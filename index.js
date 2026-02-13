@@ -1,16 +1,14 @@
 require("dotenv").config();
-const { connectDB, productsCol, ordersCol } = require("./db");
+const { connectDB, productsCol, ordersCol, pagesCol, linksCol } = require("./db");
 const { ObjectId } = require("mongodb");
 
 const express = require("express");
 const path = require("path");
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
-
-// Serve the web client from /public
 app.use(express.static(path.join(__dirname, "public")));
 
 // --- Helpers ---
@@ -77,7 +75,7 @@ function productToHtml(product) {
     </ul>
 
     <h2>JSON representation</h2>
-    <p>Request this same URL with <code>Accept: application/json</code> (e.g., via fetch/Postman).</p>
+    <p>Request this same URL with <code>Accept: application/json</code>.</p>
   </div>
 </body>
 </html>`;
@@ -112,8 +110,13 @@ function reviewsToHtml(product) {
 }
 
 // --- Routes ---
+
+// INFO test
+app.get("/info", (req, res) => {
+  res.json({ name: process.env.SERVER_NAME || "BernardBilberry2067" });
+});
+
 app.get("/", (req, res) => {
-  // Handled by /public/index.html, but keep a fallback:
   res.send("Server running. Open /index.html for the client.");
 });
 
@@ -127,20 +130,17 @@ app.get("/products", async (req, res) => {
 
   const filter = {};
 
-  if (name) {
-    filter.name = { $regex: name, $options: "i" };
-  }
+  if (name) filter.name = { $regex: name, $options: "i" };
 
   if (stock === "inStock") {
     filter.stock = { $gt: 0 };
   } else if (stock !== "all") {
-    return res.status(400).json({ error: "Invalid stock value." });
+    return res.status(400).json({ error: "Invalid stock value. Use 'all' or 'inStock'." });
   }
 
   const products = await productsCol().find(filter).toArray();
   res.json(products);
 });
-
 
 /**
  * 2) Create a new product
@@ -150,20 +150,11 @@ app.post("/products", async (req, res) => {
   const err = validateNewProduct(req.body);
   if (err) return res.status(400).json({ error: err });
 
-  const newProduct = {
-    ...req.body,
-    reviews: []
-  };
+  const newProduct = { ...req.body, reviews: [] };
   const result = await productsCol().insertOne(newProduct);
 
-  const insertedProduct = {
-    _id: result.insertedId,
-    ...newProduct
-  };
-  
-  res.status(201).json(insertedProduct);
+  res.status(201).json({ _id: result.insertedId, ...newProduct });
 });
-
 
 /**
  * 3) Retrieve a product by ID, JSON or HTML (via Accept header)
@@ -173,21 +164,18 @@ app.get("/products/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
     const product = await productsCol().findOne({ _id });
-    
-    if (!product) {
-      return res.status(404).json({ error: "Product not found." });
-    }
+
+    if (!product) return res.status(404).json({ error: "Product not found." });
 
     res.format({
       "application/json": () => res.json(product),
       "text/html": () => res.type("html").send(productToHtml(product)),
       default: () => res.status(406).send("Not Acceptable"),
     });
-  } catch (error) {
+  } catch {
     return res.status(400).json({ error: "Invalid product ID format." });
   }
 });
-
 
 /**
  * 4) Add a review (rating 1-10) for a product
@@ -198,9 +186,9 @@ app.post("/reviews/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
     const rating = req.body?.rating;
-    
+
     if (!Number.isInteger(rating) || rating < 1 || rating > 10) {
-      return res.status(400).json({ error: "Rating must be 1–10." });
+      return res.status(400).json({ error: "Rating must be an integer from 1 to 10." });
     }
 
     const result = await productsCol().findOneAndUpdate(
@@ -209,100 +197,429 @@ app.post("/reviews/:id", async (req, res) => {
       { returnDocument: "after" }
     );
 
-    if (!result) {
-      console.log("Result:", result);  // Logs the entire result object
-      return res.status(404).json({ error: "Product not found." });
-    }
-
+    if (!result.value) return res.status(404).json({ error: "Product not found." });
 
     res.status(201).json({
       productId: _id.toString(),
-      reviews: result.reviews
+      reviews: result.value.reviews,
     });
-  } catch (error) {
+  } catch {
     return res.status(400).json({ error: "Invalid product ID format." });
   }
 });
 
-
 /**
- * 5) Get only reviews for a product, JSON or HTML (via Accept header)
+ * 5) Get only reviews for a product, JSON or HTML
  * GET /reviews/:id
  */
 app.get("/reviews/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
     const product = await productsCol().findOne({ _id });
-    
-    if (!product) {
-      return res.status(404).json({ error: "Product not found." });
-    }
+
+    if (!product) return res.status(404).json({ error: "Product not found." });
 
     const reviews = Array.isArray(product.reviews) ? product.reviews : [];
 
     res.format({
-      "application/json": () => res.json({ productId: _id.toString, reviews }),
+      "application/json": () => res.json({ productId: _id.toString(), reviews }),
       "text/html": () => res.type("html").send(reviewsToHtml(product)),
       default: () => res.status(406).send("Not Acceptable"),
     });
-  } catch (error) {
+  } catch {
     return res.status(400).json({ error: "Invalid product ID format." });
   }
 });
 
-// POST /orders: create a new order, validate, decrement stock, store order
+/**
+ * POST /orders
+ * GET /orders
+ * GET /orders/:id
+ */
+function normalizeOrderItems(items) {
+  // Combine duplicates by productId
+  const map = new Map();
+  for (const it of items) {
+    map.set(it.productId, (map.get(it.productId) || 0) + it.quantity);
+  }
+  return [...map.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+}
+
 app.post("/orders", async (req, res) => {
-  const { customerName, items } = req.body;
-  
-  if (!customerName) return res.status(409).json({ error: "Customer name missing." });
-  
-  const validatedItems = [];
-  for (const item of items) {
-    const _id = new ObjectId(item.productId);
-    const product = await productsCol().findOne({ _id });
-    
-    if (!product) return res.status(409).json({ error: "Product does not exist." });
-    if (item.quantity <= 0) {
-      return res.status(409).json({ error: "Invalid quantity amount. Must be from 1 to the item stock, if item is still in stock." }); 
-    } else if (item.quantity > product.stock) {
-      return res.status(409).json({ error: "Quantity for product(s) is greater than current stock." });
+  const { customerName, items } = req.body ?? {};
+
+  const problems = [];
+
+  if (typeof customerName !== "string" || customerName.trim().length === 0) {
+    problems.push("Missing purchaser name: 'customerName' must be a non-empty string.");
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    problems.push("Missing items: 'items' must be a non-empty array.");
+  } else {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (typeof it !== "object" || it === null) {
+        problems.push(`Item #${i + 1} must be an object.`);
+        continue;
+      }
+      if (typeof it.productId !== "string" || it.productId.trim().length === 0) {
+        problems.push(`Item #${i + 1}: 'productId' must be a non-empty string.`);
+      }
+      if (!Number.isInteger(it.quantity) || it.quantity <= 0) {
+        problems.push(`Item #${i + 1}: 'quantity' must be an integer > 0.`);
+      }
     }
-  
-    validatedItems.push({ _id, productStock: product.stock, itemQuantity: item.quantity });
   }
 
-  for (const validatedItem of validatedItems) {
-    await productsCol().updateOne(
-      { _id: validatedItem._id },
-      { $set: { stock: validatedItem.productStock - validatedItem.itemQuantity } }
+  if (problems.length) {
+    return res.status(409).json({ error: "Invalid order", problems });
+  }
+
+  // Normalize duplicates
+  const normalized = normalizeOrderItems(items);
+
+  // Convert ids + fetch products
+  const parsed = [];
+  for (const it of normalized) {
+    let _id;
+    try {
+      _id = new ObjectId(it.productId);
+    } catch {
+      return res.status(409).json({
+        error: "Invalid order",
+        problems: [`Invalid productId format: ${it.productId}`],
+      });
+    }
+
+    const product = await productsCol().findOne({ _id });
+    if (!product) {
+      return res.status(409).json({
+        error: "Invalid order",
+        problems: [`Product does not exist: productId=${it.productId}`],
+      });
+    }
+
+    parsed.push({ _id, quantity: it.quantity, product });
+  }
+
+  // Stock check + decrement using conditional update (prevents negative stock)
+  for (const it of parsed) {
+    const result = await productsCol().updateOne(
+      { _id: it._id, stock: { $gte: it.quantity } },
+      { $inc: { stock: -it.quantity } }
     );
-    await ordersCol().insertOne({ ...req.body });
+
+    if (result.matchedCount === 0) {
+      return res.status(409).json({
+        error: "Invalid order",
+        problems: [
+          `Insufficient stock for productId=${it._id.toString()} (${it.product.name}): requested=${it.quantity}, available=${it.product.stock}`,
+        ],
+      });
+    }
   }
 
-  return res.status(201).json({ message: "Order successfully placed." });
+  // Create order snapshot once
+  const orderDoc = {
+    customerName: customerName.trim(),
+    createdAt: new Date(),
+    items: parsed.map(it => ({
+      productId: it._id.toString(),
+      quantity: it.quantity,
+      name: it.product.name,
+      unitPrice: it.product.price,
+    })),
+  };
+
+  const insert = await ordersCol().insertOne(orderDoc);
+
+  res.status(201)
+    .set("Location", `/orders/${insert.insertedId.toString()}`)
+    .json({
+      _id: insert.insertedId,
+      ...orderDoc,
+      links: { self: `/orders/${insert.insertedId.toString()}` },
+    });
 });
 
-// GET /orders
 app.get("/orders", async (req, res) => {
-  const orders = await ordersCol().find().toArray();
-  res.json(orders);
+  const orders = await ordersCol()
+    .find({}, { projection: { customerName: 1, createdAt: 1, items: 1 } })
+    .sort({ createdAt: -1 })
+    .toArray();
+
+  res.json(
+    orders.map(o => ({
+      _id: o._id,
+      customerName: o.customerName,
+      createdAt: o.createdAt,
+      itemCount: Array.isArray(o.items) ? o.items.length : 0,
+      links: { self: `/orders/${o._id.toString()}` },
+    }))
+  );
 });
 
-// GET /orders/:id
 app.get("/orders/:id", async (req, res) => {
-  const _id = new ObjectId(req.params.id);
+  try {
+    const _id = new ObjectId(req.params.id);
+    const order = await ordersCol().findOne({ _id });
 
-  const order = await ordersCol().findOne({ _id });
-  if (!order) return res.status(404).json({ error: "Order not found." });
+    if (!order) return res.status(404).json({ error: "Order not found." });
 
-  res.json(order);
+    res.json({
+      _id: order._id,
+      customerName: order.customerName,
+      createdAt: order.createdAt,
+      items: order.items || [],
+      links: { self: `/orders/${order._id.toString()}` },
+    });
+  } catch {
+    return res.status(400).json({ error: "Invalid order ID format." });
+  }
 });
 
+/**
+ * 1) GET /:datasetName/popular
+ * 2) GET /:datasetName/pages/:pageId
+ */
+
+// Popular pages: top 10 by incoming link count
+app.get("/:datasetName/popular", async (req, res) => {
+  const datasetName = req.params.datasetName;
+  const base = `${req.protocol}://${req.get("host")}`;
+
+  try {
+    const top10 = await linksCol()
+      .aggregate([
+        { $match: { dataset: datasetName } },
+
+        // exclude self-links
+        { $match: { $expr: { $ne: ["$from", "$to"] } } },
+
+        // unique incoming sources (dedupe by from->to)
+        { $group: { _id: { to: "$to", from: "$from" } } },
+        { $group: { _id: "$_id.to", incomingCount: { $sum: 1 } } },
+
+        // deterministic ordering
+        { $sort: { incomingCount: -1, _id: 1 } },
+        { $limit: 10 },
+
+        // join to pages to get the page document _id for this dataset+url
+        {
+          $lookup: {
+            from: "pages",
+            let: { toUrl: "$_id" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ["$dataset", datasetName] },
+                      { $eq: ["$url", "$$toUrl"] },
+                    ],
+                  },
+                },
+              },
+              { $project: { _id: 1, url: 1 } },
+              { $limit: 1 },
+            ],
+            as: "page",
+          },
+        },
+        { $unwind: { path: "$page", preserveNullAndEmptyArrays: true } },
+      ])
+      .toArray();
+
+    const result = top10.map((row) => {
+      const origUrl = row._id;
+      return {
+        url: row.page?._id
+          ? `${base}/${datasetName}/pages/${row.page._id.toString()}`
+          : `${base}/${datasetName}/pages/byUrl/${encodeURIComponent(origUrl)}`,
+        origUrl,
+      };
+    });
+
+    res.json({ result });
+  } catch (err) {
+    console.error("Error in /popular:", err);
+    res.status(500).json({ error: "Failed to compute popular pages." });
+  }
+});
+
+// Page details: original URL + list of incoming links
+app.get("/:datasetName/pages/:pageId", async (req, res) => {
+  const datasetName = req.params.datasetName;
+  const pageId = req.params.pageId;
+
+  try {
+    if (!ObjectId.isValid(pageId)) {
+      return res.status(400).json({ error: "Invalid page id." });
+    }
+
+    const _id = new ObjectId(pageId);
+
+    // Find the page doc to get its original crawled URL
+    const page = await pagesCol().findOne(
+      { _id, dataset: datasetName },
+      { projection: { url: 1 } }
+    );
+
+    if (!page) {
+      return res.status(404).json({ error: "Page not found." });
+    }
+
+    // Incoming links are link docs where `to` == this page's url
+    const incoming = await linksCol()
+      .find(
+        { dataset: datasetName, to: page.url },
+        { projection: { from: 1, _id: 0 } }
+      )
+      .toArray();
+
+    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+
+    res.json({
+      webUrl: page.url,
+      incomingLinks
+    });
+  } catch (err) {
+    console.error("Error in /pages/:pageId:", err);
+    res.status(500).json({ error: "Failed to fetch page details." });
+  }
+});
+
+// Optional fallback if /popular couldn't find the page doc by _id
+app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
+  const datasetName = req.params.datasetName;
+  const webUrl = decodeURIComponent(req.params.encodedUrl);
+
+  try {
+    const incoming = await linksCol()
+      .find(
+        { dataset: datasetName, to: webUrl },
+        { projection: { from: 1, _id: 0 } }
+      )
+      .toArray();
+
+    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+
+    res.json({
+      webUrl,
+      incomingLinks
+    });
+  } catch (err) {
+    console.error("Error in /pages/byUrl:", err);
+    res.status(500).json({ error: "Failed to fetch page details." });
+  }
+});
+
+app.get('/:datasetName', async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+
+    if (!req.query.q) {
+      return res.status(400).json({ error: "Missing query parameter q" });
+    }
+
+    const dataset = await pagesCol()
+      .find({ dataset: datasetName })
+      .toArray();
+
+    if (!dataset.length) {
+      return res.status(404).json({ error: "Dataset not found" });
+    }
+
+    
+    const documentFrequency = {};
+    for (const page of dataset) {
+      for (const word of Object.keys(page.termFreq)) {
+        documentFrequency[word] = (documentFrequency[word] || 0) + 1;
+      }
+    }
+    
+    const idf = {};
+    const totalDocuments = dataset.length;
+    for (const [word, df] of Object.entries(documentFrequency)) {
+      idf[word] = Math.max(
+        0,
+        Math.log2(totalDocuments / (1 + df))
+      );
+    }
+
+    const rawQueryWords = req.query.q
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(w => w.length > 0);
+
+    const queryLength = rawQueryWords.length;
+
+    const queryFrequency = {};
+    for (const word of rawQueryWords) {
+      queryFrequency[word] = (queryFrequency[word] || 0) + 1;
+    }
+
+    const vocabulary = Object.keys(queryFrequency)
+      .filter(word => idf[word] > 0);
+
+    const queryVector = [];
+    let queryMagSquared = 0;
+    for (const word of vocabulary) {
+      const tf = queryFrequency[word] / queryLength;
+      const tfidf = Math.log2(1 + tf) * idf[word];
+      queryVector.push(tfidf);
+      queryMagSquared += tfidf * tfidf;
+    }
+
+    const queryMagnitude = Math.sqrt(queryMagSquared);
+    const results = [];
+    for (const page of dataset) {
+
+      let dot = 0;
+      let pageMagSquared = 0;
+
+      for (let i = 0; i < vocabulary.length; i++) {
+
+        const word = vocabulary[i];
+
+        const freq = page.termFreq[word] || 0;
+        const tf = freq / page.wordCount;
+        const tfidf = Math.log2(1 + tf) * idf[word];
+
+        dot += tfidf * queryVector[i];
+        pageMagSquared += tfidf * tfidf;
+      }
+
+      const pageMagnitude = Math.sqrt(pageMagSquared);
+
+      const score =
+        pageMagnitude === 0 || queryMagnitude === 0
+          ? 0
+          : dot / (pageMagnitude * queryMagnitude);
+
+      results.push({
+        url: page.url,
+        score
+      });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+
+    res.json({
+      results: results.slice(0, 10)
+    });
+
+  } catch (err) {
+    console.error("Search error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // Start the server after connecting to the database
 connectDB()
   .then(() => {
-    app.listen(PORT, () => {
+    app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server listening on port ${PORT}`);
     });
   })
