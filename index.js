@@ -531,14 +531,14 @@ app.get('/:datasetName', async (req, res) => {
       return res.status(404).json({ error: "Dataset not found" });
     }
 
-    
+
     const documentFrequency = {};
     for (const page of dataset) {
       for (const word of Object.keys(page.termFreq)) {
         documentFrequency[word] = (documentFrequency[word] || 0) + 1;
       }
     }
-    
+
     const idf = {};
     const totalDocuments = dataset.length;
     for (const [word, df] of Object.entries(documentFrequency)) {
@@ -607,7 +607,7 @@ app.get('/:datasetName', async (req, res) => {
     results.sort((a, b) => b.score - a.score);
 
     res.json({
-      results: results.slice(0, 10)
+      result: results.slice(0, 10)
     });
 
   } catch (err) {
@@ -615,6 +615,9 @@ app.get('/:datasetName', async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+
+
 
 // Start the server after connecting to the database
 connectDB()
