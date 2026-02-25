@@ -109,13 +109,117 @@ function reviewsToHtml(product) {
 </html>`;
 }
 
+// --- PageRank helpers ---
+const pagerankCache = new Map(); // datasetName -> Map(url -> score)
+
+function euclideanDistance(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+async function computePageRanksForDataset(datasetName) {
+  // Return cached values if already computed
+  if (pagerankCache.has(datasetName)) {
+    return pagerankCache.get(datasetName);
+  }
+
+  const pages = await pagesCol()
+    .find({ dataset: datasetName }, { projection: { url: 1 } })
+    .toArray();
+
+  if (!pages.length) {
+    return null;
+  }
+
+  const urls = pages.map(p => p.url);
+  const N = urls.length;
+
+  // URL -> index
+  const indexByUrl = new Map();
+  urls.forEach((url, i) => indexByUrl.set(url, i));
+
+  // Load links
+  const allLinks = await linksCol()
+    .find({ dataset: datasetName }, { projection: { from: 1, to: 1, _id: 0 } })
+    .toArray();
+
+  // Build adjacency list using ONLY pages in this dataset
+  // Deduplicate outgoing links; ignore links to pages outside the dataset.
+  const outNeighbors = Array.from({ length: N }, () => new Set());
+
+  for (const link of allLinks) {
+    const fromIdx = indexByUrl.get(link.from);
+    const toIdx = indexByUrl.get(link.to);
+
+    if (fromIdx === undefined || toIdx === undefined) continue;
+
+    // Ignore self-links (usually doesn't matter if none exist)
+    if (fromIdx === toIdx) continue;
+
+    outNeighbors[fromIdx].add(toIdx);
+  }
+
+  // Iterative PageRank: alpha = teleport probability
+  const alpha = 0.1;
+  const threshold = 0.0001;
+
+  let pr = Array(N).fill(1 / N);
+  let next = Array(N).fill(0);
+
+  while (true) {
+    const base = alpha / N;
+
+    // Reset next vector with teleport contribution
+    for (let i = 0; i < N; i++) next[i] = base;
+
+    // Dangling mass (pages with no outgoing links)
+    let danglingMass = 0;
+    for (let i = 0; i < N; i++) {
+      if (outNeighbors[i].size === 0) {
+        danglingMass += pr[i];
+      }
+    }
+
+    // Distribute dangling mass uniformly
+    const danglingContribution = (1 - alpha) * (danglingMass / N);
+    for (let i = 0; i < N; i++) {
+      next[i] += danglingContribution;
+    }
+
+    // Distribute normal link-following mass
+    for (let j = 0; j < N; j++) {
+      const outDeg = outNeighbors[j].size;
+      if (outDeg === 0) continue;
+
+      const share = (1 - alpha) * (pr[j] / outDeg);
+      for (const i of outNeighbors[j]) {
+        next[i] += share;
+      }
+    }
+
+    // Check convergence
+    const dist = euclideanDistance(pr, next);
+    if (dist < threshold) break;
+
+    // Swap vectors
+    pr = [...next];
+  }
+
+  // Save as URL -> score map
+  const scoreMap = new Map();
+  for (let i = 0; i < N; i++) {
+    scoreMap.set(urls[i], pr[i]);
+  }
+
+  pagerankCache.set(datasetName, scoreMap);
+  return scoreMap;
+}
+
 // --- Routes ---
-
-// INFO test
-app.get("/info", (req, res) => {
-  res.json({ name: process.env.SERVER_NAME || "BernardBilberry2067" });
-});
-
 app.get("/", (req, res) => {
   res.send("Server running. Open /index.html for the client.");
 });
@@ -515,6 +619,92 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   }
 });
 
+// Lab 5
+app.get("/pageranks", async (req, res) => {
+  try {
+    const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
+    if (!url) {
+      return res.status(400).send("Missing query parameter url");
+    }
+
+    // Find the page to identify dataset
+    const page = await pagesCol().findOne({ url }, { projection: { url: 1, dataset: 1 } });
+    if (!page) {
+      return res.status(404).send("URL not found");
+    }
+
+    const datasetName = page.dataset;
+
+    // Get all pages in this dataset
+    const pages = await pagesCol()
+      .find({ dataset: datasetName }, { projection: { url: 1 } })
+      .toArray();
+
+    if (!pages.length) return res.status(404).send("Dataset not found");
+
+    const urls = pages.map(p => p.url);
+    const N = urls.length;
+
+    // index maps
+    const indexOf = new Map(urls.map((u, i) => [u, i]));
+
+    // Build outgoing adjacency (dedupe + ignore links to pages outside dataset)
+    const rawLinks = await linksCol()
+      .find({ dataset: datasetName }, { projection: { from: 1, to: 1, _id: 0 } })
+      .toArray();
+
+    const outSets = Array.from({ length: N }, () => new Set());
+
+    for (const l of rawLinks) {
+      const i = indexOf.get(l.from);
+      const j = indexOf.get(l.to);
+      if (i === undefined || j === undefined) continue; // only pages found in this dataset
+      outSets[i].add(j); // includes self-links if present (that's okay for pagerank)
+    }
+
+    // PageRank parameters
+    const alpha = 0.1;
+    const teleport = alpha / N;
+    let pr = Array(N).fill(1 / N);
+
+    while (true) {
+      const next = Array(N).fill(teleport);
+
+      for (let i = 0; i < N; i++) {
+        const out = outSets[i];
+        const outDegree = out.size;
+
+        if (outDegree === 0) {
+          // sink node distributes to all pages
+          const share = ((1 - alpha) * pr[i]) / N;
+          for (let j = 0; j < N; j++) next[j] += share;
+        } else {
+          const share = ((1 - alpha) * pr[i]) / outDegree;
+          for (const j of out) next[j] += share;
+        }
+      }
+
+      // Euclidean distance
+      let distSq = 0;
+      for (let i = 0; i < N; i++) {
+        const d = next[i] - pr[i];
+        distSq += d * d;
+      }
+      const dist = Math.sqrt(distSq);
+
+      pr = next;
+      if (dist < 0.0001) break;
+    }
+
+    const score = pr[indexOf.get(url)] ?? 0;
+
+    res.type("text/plain").send(String(score));
+  } catch (err) {
+    console.error("Pagerank error:", err);
+    res.status(500).send("Internal server error");
+  }
+});
+
 app.get('/:datasetName', async (req, res) => {
   try {
     const datasetName = req.params.datasetName;
@@ -530,7 +720,6 @@ app.get('/:datasetName', async (req, res) => {
     if (!dataset.length) {
       return res.status(404).json({ error: "Dataset not found" });
     }
-
 
     const documentFrequency = {};
     for (const page of dataset) {
@@ -615,9 +804,6 @@ app.get('/:datasetName', async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-
-
-
 
 // Start the server after connecting to the database
 connectDB()
