@@ -24,4 +24,14 @@ function ordersCol() {
   return db.collection("orders");
 }
 
-module.exports = { connectDB, productsCol, ordersCol };
+function pagesCol() {
+  if (!db) throw new Error("DB not connected");
+  return db.collection("pages");
+}
+
+function linksCol() {
+  if (!db) throw new Error("DB not connected");
+  return db.collection("links");
+}
+
+module.exports = { connectDB, productsCol, ordersCol, pagesCol, linksCol };
