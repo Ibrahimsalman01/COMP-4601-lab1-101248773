@@ -148,7 +148,6 @@ async function computePageRanksForDataset(datasetName) {
     .toArray();
 
   // Build adjacency list using ONLY pages in this dataset
-  // Deduplicate outgoing links; ignore links to pages outside the dataset.
   const outNeighbors = Array.from({ length: N }, () => new Set());
 
   for (const link of allLinks) {
@@ -157,7 +156,7 @@ async function computePageRanksForDataset(datasetName) {
 
     if (fromIdx === undefined || toIdx === undefined) continue;
 
-    // Ignore self-links (usually doesn't matter if none exist)
+    // Ignore self-links
     if (fromIdx === toIdx) continue;
 
     outNeighbors[fromIdx].add(toIdx);
@@ -217,6 +216,36 @@ async function computePageRanksForDataset(datasetName) {
 
   pagerankCache.set(datasetName, scoreMap);
   return scoreMap;
+}
+
+function parseBoost(v) {
+  if (typeof v !== "string") return false;
+  const s = v.trim().toLowerCase();
+  return s === "true";
+}
+
+function parseLimit(v) {
+  let n = 10;
+  if (typeof v === "string" && v.trim().length) {
+    const x = Number(v);
+    if (Number.isFinite(x)) n = Math.trunc(x);
+  }
+  if (n < 1) n = 1;
+  if (n > 50) n = 50;
+  return n;
+}
+
+function safeTitle(page) {
+  const t = (page && typeof page.title === "string") ? page.title.trim() : "";
+  if (t) return t;
+  const url = page?.url || "";
+  try {
+    const u = new URL(url);
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    return last || url;
+  } catch {
+    return url;
+  }
 }
 
 // --- Routes ---
@@ -619,99 +648,114 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   }
 });
 
-// Lab 5
+// PageRank value by URL (plain text) and store PR to DB
 app.get("/pageranks", async (req, res) => {
   try {
     const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
     if (!url) {
-      return res.status(400).send("Missing query parameter url");
+      return res.status(400).type("text/plain").send("Missing query parameter url");
     }
 
-    // Find the page to identify dataset
     const page = await pagesCol().findOne({ url }, { projection: { url: 1, dataset: 1 } });
     if (!page) {
-      return res.status(404).send("URL not found");
+      return res.status(404).type("text/plain").send("URL not found");
     }
 
     const datasetName = page.dataset;
 
-    // Get all pages in this dataset
-    const pages = await pagesCol()
-      .find({ dataset: datasetName }, { projection: { url: 1 } })
-      .toArray();
+    let prMap = pagerankCache.get(datasetName);
+    if (!prMap) {
+      prMap = await computePageRanksForDataset(datasetName);
+      if (!prMap) return res.status(404).type("text/plain").send("Dataset not found");
 
-    if (!pages.length) return res.status(404).send("Dataset not found");
+      // Add PageRank to DB
+      const bulk = [];
+      for (const [u, pr] of prMap.entries()) {
+        bulk.push({
+          updateOne: {
+            filter: { dataset: datasetName, url: u },
+            update: { $set: { pr } },
+          },
+        });
+      }
+      if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
 
-    const urls = pages.map(p => p.url);
-    const N = urls.length;
-
-    // index maps
-    const indexOf = new Map(urls.map((u, i) => [u, i]));
-
-    // Build outgoing adjacency (dedupe + ignore links to pages outside dataset)
-    const rawLinks = await linksCol()
-      .find({ dataset: datasetName }, { projection: { from: 1, to: 1, _id: 0 } })
-      .toArray();
-
-    const outSets = Array.from({ length: N }, () => new Set());
-
-    for (const l of rawLinks) {
-      const i = indexOf.get(l.from);
-      const j = indexOf.get(l.to);
-      if (i === undefined || j === undefined) continue; // only pages found in this dataset
-      outSets[i].add(j); // includes self-links if present (that's okay for pagerank)
+      pagerankCache.set(datasetName, prMap);
     }
 
-    // PageRank parameters
-    const alpha = 0.1;
-    const teleport = alpha / N;
-    let pr = Array(N).fill(1 / N);
-
-    while (true) {
-      const next = Array(N).fill(teleport);
-
-      for (let i = 0; i < N; i++) {
-        const out = outSets[i];
-        const outDegree = out.size;
-
-        if (outDegree === 0) {
-          // sink node distributes to all pages
-          const share = ((1 - alpha) * pr[i]) / N;
-          for (let j = 0; j < N; j++) next[j] += share;
-        } else {
-          const share = ((1 - alpha) * pr[i]) / outDegree;
-          for (const j of out) next[j] += share;
-        }
-      }
-
-      // Euclidean distance
-      let distSq = 0;
-      for (let i = 0; i < N; i++) {
-        const d = next[i] - pr[i];
-        distSq += d * d;
-      }
-      const dist = Math.sqrt(distSq);
-
-      pr = next;
-      if (dist < 0.0001) break;
-    }
-
-    const score = pr[indexOf.get(url)] ?? 0;
+    const score = prMap.get(url);
+    if (score === undefined) return res.status(404).type("text/plain").send("URL not found");
 
     res.type("text/plain").send(String(score));
   } catch (err) {
     console.error("Pagerank error:", err);
-    res.status(500).send("Internal server error");
+    res.status(500).type("text/plain").send("Internal server error");
   }
 });
 
+// Page details for UI (optional)
+app.get("/page", async (req, res) => {
+  try {
+    const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
+    if (!url) return res.status(400).json({ error: "Missing query parameter url" });
+
+    const page = await pagesCol().findOne(
+      { url },
+      { projection: { _id: 0, dataset: 1, url: 1, title: 1, termFreq: 1, wordCount: 1, pr: 1, outLinks: 1 } }
+    );
+    if (!page) return res.status(404).json({ error: "URL not found" });
+
+    if (typeof page.pr !== "number") {
+      const prMap = pagerankCache.get(page.dataset) || await computePageRanksForDataset(page.dataset);
+      if (prMap) {
+        const bulk = [];
+        for (const [u, pr] of prMap.entries()) {
+          bulk.push({ updateOne: { filter: { dataset: page.dataset, url: u }, update: { $set: { pr } } } });
+        }
+        if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
+        pagerankCache.set(page.dataset, prMap);
+        page.pr = prMap.get(url) ?? 0;
+      } else {
+        page.pr = 0;
+      }
+    }
+
+    const incoming = await linksCol()
+      .find({ dataset: page.dataset, to: url }, { projection: { from: 1, _id: 0 } })
+      .toArray();
+
+    const outgoing = await linksCol()
+      .find({ dataset: page.dataset, from: url }, { projection: { to: 1, _id: 0 } })
+      .toArray();
+
+    res.json({
+      url: page.url,
+      title: safeTitle(page),
+      pr: page.pr ?? 0,
+      incomingLinks: [...new Set(incoming.map(x => x.from))],
+      outgoingLinks: [...new Set(outgoing.map(x => x.to))],
+      wordCount: page.wordCount ?? 0,
+      termFreq: page.termFreq || {},
+      outLinks: page.outLinks || []
+    });
+  } catch (err) {
+    console.error("Error in /page:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Search endpoint for datasets (supports q, boost, limit; returns url, score, title, pr)
 app.get('/:datasetName', async (req, res) => {
   try {
     const datasetName = req.params.datasetName;
 
-    if (!req.query.q) {
-      return res.status(400).json({ error: "Missing query parameter q" });
-    }
+    // Support q and phrase; assignment specifies q
+    const queryText =
+      (typeof req.query.q === "string" ? req.query.q : "") ||
+      (typeof req.query.phrase === "string" ? req.query.phrase : "");
+
+    const boost = parseBoost(req.query.boost);
+    const limit = parseLimit(req.query.limit);
 
     const dataset = await pagesCol()
       .find({ dataset: datasetName })
@@ -721,9 +765,35 @@ app.get('/:datasetName', async (req, res) => {
       return res.status(404).json({ error: "Dataset not found" });
     }
 
+    // Ensure PR is available (required pr field; also needed for boost)
+    if (!pagerankCache.has(datasetName)) {
+      const prMap = await computePageRanksForDataset(datasetName);
+      if (prMap) {
+        const bulk = [];
+        for (const [u, pr] of prMap.entries()) {
+          bulk.push({
+            updateOne: { filter: { dataset: datasetName, url: u }, update: { $set: { pr } } }
+          });
+        }
+        if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
+        pagerankCache.set(datasetName, prMap);
+      }
+    }
+
+    // If no query, MUST return exactly limit results with score=0
+    if (!queryText || !queryText.trim().length) {
+      const out = dataset.slice(0, limit).map(p => ({
+        url: p.url,
+        score: 0,
+        title: safeTitle(p),
+        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
+      }));
+      return res.json({ result: out });
+    }
+
     const documentFrequency = {};
     for (const page of dataset) {
-      for (const word of Object.keys(page.termFreq)) {
+      for (const word of Object.keys(page.termFreq || {})) {
         documentFrequency[word] = (documentFrequency[word] || 0) + 1;
       }
     }
@@ -731,16 +801,24 @@ app.get('/:datasetName', async (req, res) => {
     const idf = {};
     const totalDocuments = dataset.length;
     for (const [word, df] of Object.entries(documentFrequency)) {
-      idf[word] = Math.max(
-        0,
-        Math.log2(totalDocuments / (1 + df))
-      );
+      idf[word] = Math.max(0, Math.log2(totalDocuments / (1 + df)));
     }
 
-    const rawQueryWords = req.query.q
+    const rawQueryWords = queryText
       .toLowerCase()
       .split(/\W+/)
       .filter(w => w.length > 0);
+
+    // If tokenizer yields nothing, return any limit docs with score 0
+    if (rawQueryWords.length === 0) {
+      const out = dataset.slice(0, limit).map(p => ({
+        url: p.url,
+        score: 0,
+        title: safeTitle(p),
+        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
+      }));
+      return res.json({ result: out });
+    }
 
     const queryLength = rawQueryWords.length;
 
@@ -749,8 +827,18 @@ app.get('/:datasetName', async (req, res) => {
       queryFrequency[word] = (queryFrequency[word] || 0) + 1;
     }
 
-    const vocabulary = Object.keys(queryFrequency)
-      .filter(word => idf[word] > 0);
+    const vocabulary = Object.keys(queryFrequency).filter(word => (idf[word] || 0) > 0);
+
+    // If all query terms have idf==0, scores will be 0; still return limit docs
+    if (vocabulary.length === 0) {
+      const out = dataset.slice(0, limit).map(p => ({
+        url: p.url,
+        score: 0,
+        title: safeTitle(p),
+        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
+      }));
+      return res.json({ result: out });
+    }
 
     const queryVector = [];
     let queryMagSquared = 0;
@@ -762,18 +850,18 @@ app.get('/:datasetName', async (req, res) => {
     }
 
     const queryMagnitude = Math.sqrt(queryMagSquared);
+
     const results = [];
     for (const page of dataset) {
-
       let dot = 0;
       let pageMagSquared = 0;
 
       for (let i = 0; i < vocabulary.length; i++) {
-
         const word = vocabulary[i];
 
-        const freq = page.termFreq[word] || 0;
-        const tf = freq / page.wordCount;
+        const freq = (page.termFreq && page.termFreq[word]) ? page.termFreq[word] : 0;
+        const wc = page.wordCount || 0;
+        const tf = wc > 0 ? (freq / wc) : 0;
         const tfidf = Math.log2(1 + tf) * idf[word];
 
         dot += tfidf * queryVector[i];
@@ -782,21 +870,27 @@ app.get('/:datasetName', async (req, res) => {
 
       const pageMagnitude = Math.sqrt(pageMagSquared);
 
-      const score =
+      const baseScore =
         pageMagnitude === 0 || queryMagnitude === 0
           ? 0
           : dot / (pageMagnitude * queryMagnitude);
 
+      const pr = (typeof page.pr === "number") ? page.pr : (pagerankCache.get(datasetName)?.get(page.url) ?? 0);
+      const finalScore = boost ? (baseScore * (1 + pr)) : baseScore;
+
       results.push({
         url: page.url,
-        score
+        score: finalScore,
+        title: safeTitle(page),
+        pr
       });
     }
 
-    results.sort((a, b) => b.score - a.score);
+    results.sort((a, b) => (b.score - a.score) || a.url.localeCompare(b.url));
 
+    // MUST return exactly limit results (fruitsA dataset has 100 pages, limit max 50)
     res.json({
-      result: results.slice(0, 10)
+      result: results.slice(0, limit)
     });
 
   } catch (err) {
