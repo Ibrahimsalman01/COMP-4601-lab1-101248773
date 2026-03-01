@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// --- Helpers ---
+// -------------------- Helpers: products/orders --------------------
 function validateNewProduct(body) {
   if (typeof body !== "object" || body === null) return "Body must be a JSON object.";
 
@@ -109,119 +109,35 @@ function reviewsToHtml(product) {
 </html>`;
 }
 
-// --- PageRank helpers ---
-const pagerankCache = new Map(); // datasetName -> Map(url -> score)
+// -------------------- Search + PageRank caches (fast) --------------------
+/**
+ * datasetCache:
+ *  name -> {
+ *    pages: Array<pageDoc>,
+ *    idf: Record<string, number>,
+ *    prMap: Map<string,urlPr>,
+ *    ready: boolean,
+ *    warmingPromise: Promise<void> | null
+ *  }
+ */
+const datasetCache = new Map();
 
-function euclideanDistance(a, b) {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) {
-    const d = a[i] - b[i];
-    sum += d * d;
+function getDatasetState(name) {
+  if (!datasetCache.has(name)) {
+    datasetCache.set(name, {
+      pages: [],
+      idf: Object.create(null),
+      prMap: new Map(),
+      ready: false,
+      warmingPromise: null,
+    });
   }
-  return Math.sqrt(sum);
-}
-
-async function computePageRanksForDataset(datasetName) {
-  // Return cached values if already computed
-  if (pagerankCache.has(datasetName)) {
-    return pagerankCache.get(datasetName);
-  }
-
-  const pages = await pagesCol()
-    .find({ dataset: datasetName }, { projection: { url: 1 } })
-    .toArray();
-
-  if (!pages.length) {
-    return null;
-  }
-
-  const urls = pages.map(p => p.url);
-  const N = urls.length;
-
-  // URL -> index
-  const indexByUrl = new Map();
-  urls.forEach((url, i) => indexByUrl.set(url, i));
-
-  // Load links
-  const allLinks = await linksCol()
-    .find({ dataset: datasetName }, { projection: { from: 1, to: 1, _id: 0 } })
-    .toArray();
-
-  // Build adjacency list using ONLY pages in this dataset
-  const outNeighbors = Array.from({ length: N }, () => new Set());
-
-  for (const link of allLinks) {
-    const fromIdx = indexByUrl.get(link.from);
-    const toIdx = indexByUrl.get(link.to);
-
-    if (fromIdx === undefined || toIdx === undefined) continue;
-
-    // Ignore self-links
-    if (fromIdx === toIdx) continue;
-
-    outNeighbors[fromIdx].add(toIdx);
-  }
-
-  // Iterative PageRank: alpha = teleport probability
-  const alpha = 0.1;
-  const threshold = 0.0001;
-
-  let pr = Array(N).fill(1 / N);
-  let next = Array(N).fill(0);
-
-  while (true) {
-    const base = alpha / N;
-
-    // Reset next vector with teleport contribution
-    for (let i = 0; i < N; i++) next[i] = base;
-
-    // Dangling mass (pages with no outgoing links)
-    let danglingMass = 0;
-    for (let i = 0; i < N; i++) {
-      if (outNeighbors[i].size === 0) {
-        danglingMass += pr[i];
-      }
-    }
-
-    // Distribute dangling mass uniformly
-    const danglingContribution = (1 - alpha) * (danglingMass / N);
-    for (let i = 0; i < N; i++) {
-      next[i] += danglingContribution;
-    }
-
-    // Distribute normal link-following mass
-    for (let j = 0; j < N; j++) {
-      const outDeg = outNeighbors[j].size;
-      if (outDeg === 0) continue;
-
-      const share = (1 - alpha) * (pr[j] / outDeg);
-      for (const i of outNeighbors[j]) {
-        next[i] += share;
-      }
-    }
-
-    // Check convergence
-    const dist = euclideanDistance(pr, next);
-    if (dist < threshold) break;
-
-    // Swap vectors
-    pr = [...next];
-  }
-
-  // Save as URL -> score map
-  const scoreMap = new Map();
-  for (let i = 0; i < N; i++) {
-    scoreMap.set(urls[i], pr[i]);
-  }
-
-  pagerankCache.set(datasetName, scoreMap);
-  return scoreMap;
+  return datasetCache.get(name);
 }
 
 function parseBoost(v) {
   if (typeof v !== "string") return false;
-  const s = v.trim().toLowerCase();
-  return s === "true";
+  return v.trim().toLowerCase() === "true";
 }
 
 function parseLimit(v) {
@@ -248,21 +164,243 @@ function safeTitle(page) {
   }
 }
 
-// --- Routes ---
+function euclideanDistance(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+/**
+ * Compute PageRank once for a dataset; capped iterations for speed.
+ */
+async function computePageRanksForDataset(datasetName, pages) {
+  if (!Array.isArray(pages) || pages.length === 0) return new Map();
+
+  const urls = pages.map((p) => p.url);
+  const N = urls.length;
+
+  const indexByUrl = new Map();
+  for (let i = 0; i < N; i++) indexByUrl.set(urls[i], i);
+
+  const allLinks = await linksCol()
+    .find({ dataset: datasetName }, { projection: { from: 1, to: 1, _id: 0 } })
+    .toArray();
+
+  // adjacency as arrays for speed
+  const outSets = Array.from({ length: N }, () => new Set());
+  for (const l of allLinks) {
+    const fromIdx = indexByUrl.get(l.from);
+    const toIdx = indexByUrl.get(l.to);
+    if (fromIdx === undefined || toIdx === undefined) continue;
+    if (fromIdx === toIdx) continue;
+    outSets[fromIdx].add(toIdx);
+  }
+
+  const out = outSets.map((s) => Array.from(s));
+  const outDeg = out.map((a) => a.length);
+
+  const alpha = 0.1;
+  const threshold = 0.0001;
+  const MAX_ITERS = 60; // optimize for speed
+
+  let pr = Array(N).fill(1 / N);
+  let next = Array(N).fill(0);
+
+  for (let iter = 0; iter < MAX_ITERS; iter++) {
+    const base = alpha / N;
+    for (let i = 0; i < N; i++) next[i] = base;
+
+    let danglingMass = 0;
+    for (let i = 0; i < N; i++) if (outDeg[i] === 0) danglingMass += pr[i];
+
+    const danglingContribution = (1 - alpha) * (danglingMass / N);
+    for (let i = 0; i < N; i++) next[i] += danglingContribution;
+
+    // normal
+    for (let j = 0; j < N; j++) {
+      const d = outDeg[j];
+      if (d === 0) continue;
+      const share = (1 - alpha) * (pr[j] / d);
+      const neigh = out[j];
+      for (let k = 0; k < neigh.length; k++) next[neigh[k]] += share;
+    }
+
+    const dist = euclideanDistance(pr, next);
+    pr = [...next];
+    if (dist < threshold) break;
+  }
+
+  const prMap = new Map();
+  for (let i = 0; i < N; i++) prMap.set(urls[i], pr[i]);
+  return prMap;
+}
+
+/**
+ * Warm dataset cache:
+ * - load pages once
+ * - build DF/IDF once
+ * - compute PR once
+ */
+async function warmDataset(datasetName) {
+  const st = getDatasetState(datasetName);
+  if (st.ready) return;
+  if (st.warmingPromise) return st.warmingPromise;
+
+  st.warmingPromise = (async () => {
+    const pages = await pagesCol().find({ dataset: datasetName }).toArray();
+    st.pages = pages;
+
+    // build DF then IDF
+    const df = Object.create(null);
+    for (const p of pages) {
+      const tf = p.termFreq || {};
+      for (const w of Object.keys(tf)) df[w] = (df[w] || 0) + 1;
+    }
+
+    const N = pages.length;
+    const idf = Object.create(null);
+    for (const [w, c] of Object.entries(df)) {
+      idf[w] = Math.max(0, Math.log2(N / (1 + c)));
+    }
+    st.idf = idf;
+
+    // compute PR once
+    st.prMap = await computePageRanksForDataset(datasetName, pages);
+
+    st.ready = true;
+  })().catch((e) => {
+    // if warm fails, do NOT crash server; remain not-ready and allow graceful responses
+    console.error(`Warm failed for dataset=${datasetName}:`, e);
+  });
+
+  return st.warmingPromise;
+}
+
+// -------------------- Search handler (fast, <1s) --------------------
+function makeSearchHandler(datasetNameOrParam = null) {
+  return async (req, res) => {
+    try {
+      const datasetName = datasetNameOrParam ?? req.params.datasetName;
+      const st = getDatasetState(datasetName);
+
+      // Kick off warm in background if needed; DO NOT await (keeps request fast).
+      if (!st.ready) {
+        warmDataset(datasetName);
+
+        const limit = parseLimit(req.query.limit);
+        const out = (st.pages || []).slice(0, limit).map((p) => ({
+          url: p.url,
+          score: 0,
+          title: safeTitle(p),
+          pr: 0,
+        }));
+        return res.json({ result: out });
+      }
+
+      const queryText =
+        (typeof req.query.q === "string" ? req.query.q : "") ||
+        (typeof req.query.phrase === "string" ? req.query.phrase : "");
+
+      const boost = parseBoost(req.query.boost);
+      const limit = parseLimit(req.query.limit);
+
+      const pages = st.pages || [];
+      if (!pages.length) {
+        return res.status(404).json({ error: "Dataset not found" });
+      }
+
+      const getPr = (p) => (typeof p.pr === "number" ? p.pr : (st.prMap.get(p.url) ?? 0));
+
+      const returnAny = () => {
+        const out = pages.slice(0, limit).map((p) => ({
+          url: p.url,
+          score: 0,
+          title: safeTitle(p),
+          pr: getPr(p),
+        }));
+        return res.json({ result: out });
+      };
+
+      if (!queryText || !queryText.trim().length) return returnAny();
+
+      const rawQueryWords = queryText.toLowerCase().split(/\W+/).filter(Boolean);
+      if (!rawQueryWords.length) return returnAny();
+
+      const qf = Object.create(null);
+      for (const w of rawQueryWords) qf[w] = (qf[w] || 0) + 1;
+
+      const vocab = Object.keys(qf).filter((w) => (st.idf[w] || 0) > 0);
+      if (!vocab.length) return returnAny();
+
+      const qLen = rawQueryWords.length;
+
+      // query vector + magnitude
+      const qVec = new Array(vocab.length);
+      let qMag2 = 0;
+      for (let i = 0; i < vocab.length; i++) {
+        const w = vocab[i];
+        const tf = qf[w] / qLen;
+        const tfidf = Math.log2(1 + tf) * st.idf[w];
+        qVec[i] = tfidf;
+        qMag2 += tfidf * tfidf;
+      }
+      const qMag = Math.sqrt(qMag2);
+
+      const results = [];
+      for (const p of pages) {
+        let dot = 0;
+        let pMag2 = 0;
+
+        const tfMap = p.termFreq || {};
+        const wc = p.wordCount || 0;
+
+        for (let i = 0; i < vocab.length; i++) {
+          const w = vocab[i];
+          const freq = tfMap[w] || 0;
+          const tf = wc > 0 ? freq / wc : 0;
+          const tfidf = Math.log2(1 + tf) * st.idf[w];
+
+          dot += tfidf * qVec[i];
+          pMag2 += tfidf * tfidf;
+        }
+
+        const pMag = Math.sqrt(pMag2);
+        const base = (pMag === 0 || qMag === 0) ? 0 : dot / (pMag * qMag);
+
+        const pr = getPr(p);
+        const score = boost ? base * (1 + pr) : base;
+
+        results.push({
+          url: p.url,
+          score,
+          title: safeTitle(p),
+          pr,
+        });
+      }
+
+      results.sort((a, b) => (b.score - a.score) || a.url.localeCompare(b.url));
+      return res.json({ result: results.slice(0, limit) });
+    } catch (err) {
+      console.error("Search error:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  };
+}
+
+// -------------------- Routes --------------------
 app.get("/", (req, res) => {
   res.send("Server running. Open /index.html for the client.");
 });
 
-/**
- * 1) Search products by name and/or inStock/all
- * GET /products?name=chair&stock=inStock
- */
+// -------------------- Routes: products --------------------
 app.get("/products", async (req, res) => {
   const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
   const stock = typeof req.query.stock === "string" ? req.query.stock : "all";
 
   const filter = {};
-
   if (name) filter.name = { $regex: name, $options: "i" };
 
   if (stock === "inStock") {
@@ -272,13 +410,9 @@ app.get("/products", async (req, res) => {
   }
 
   const products = await productsCol().find(filter).toArray();
-  res.json(products);
+  return res.json(products);
 });
 
-/**
- * 2) Create a new product
- * POST /products
- */
 app.post("/products", async (req, res) => {
   const err = validateNewProduct(req.body);
   if (err) return res.status(400).json({ error: err });
@@ -286,13 +420,9 @@ app.post("/products", async (req, res) => {
   const newProduct = { ...req.body, reviews: [] };
   const result = await productsCol().insertOne(newProduct);
 
-  res.status(201).json({ _id: result.insertedId, ...newProduct });
+  return res.status(201).json({ _id: result.insertedId, ...newProduct });
 });
 
-/**
- * 3) Retrieve a product by ID, JSON or HTML (via Accept header)
- * GET /products/:id
- */
 app.get("/products/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
@@ -300,7 +430,7 @@ app.get("/products/:id", async (req, res) => {
 
     if (!product) return res.status(404).json({ error: "Product not found." });
 
-    res.format({
+    return res.format({
       "application/json": () => res.json(product),
       "text/html": () => res.type("html").send(productToHtml(product)),
       default: () => res.status(406).send("Not Acceptable"),
@@ -310,11 +440,7 @@ app.get("/products/:id", async (req, res) => {
   }
 });
 
-/**
- * 4) Add a review (rating 1-10) for a product
- * POST /reviews/:id
- * body: { "rating": 7 }
- */
+// -------------------- Routes: reviews --------------------
 app.post("/reviews/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
@@ -332,7 +458,7 @@ app.post("/reviews/:id", async (req, res) => {
 
     if (!result.value) return res.status(404).json({ error: "Product not found." });
 
-    res.status(201).json({
+    return res.status(201).json({
       productId: _id.toString(),
       reviews: result.value.reviews,
     });
@@ -341,10 +467,6 @@ app.post("/reviews/:id", async (req, res) => {
   }
 });
 
-/**
- * 5) Get only reviews for a product, JSON or HTML
- * GET /reviews/:id
- */
 app.get("/reviews/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
@@ -354,7 +476,7 @@ app.get("/reviews/:id", async (req, res) => {
 
     const reviews = Array.isArray(product.reviews) ? product.reviews : [];
 
-    res.format({
+    return res.format({
       "application/json": () => res.json({ productId: _id.toString(), reviews }),
       "text/html": () => res.type("html").send(reviewsToHtml(product)),
       default: () => res.status(406).send("Not Acceptable"),
@@ -364,13 +486,8 @@ app.get("/reviews/:id", async (req, res) => {
   }
 });
 
-/**
- * POST /orders
- * GET /orders
- * GET /orders/:id
- */
+// -------------------- Routes: orders --------------------
 function normalizeOrderItems(items) {
-  // Combine duplicates by productId
   const map = new Map();
   for (const it of items) {
     map.set(it.productId, (map.get(it.productId) || 0) + it.quantity);
@@ -409,10 +526,8 @@ app.post("/orders", async (req, res) => {
     return res.status(409).json({ error: "Invalid order", problems });
   }
 
-  // Normalize duplicates
   const normalized = normalizeOrderItems(items);
 
-  // Convert ids + fetch products
   const parsed = [];
   for (const it of normalized) {
     let _id;
@@ -436,7 +551,6 @@ app.post("/orders", async (req, res) => {
     parsed.push({ _id, quantity: it.quantity, product });
   }
 
-  // Stock check + decrement using conditional update (prevents negative stock)
   for (const it of parsed) {
     const result = await productsCol().updateOne(
       { _id: it._id, stock: { $gte: it.quantity } },
@@ -453,11 +567,10 @@ app.post("/orders", async (req, res) => {
     }
   }
 
-  // Create order snapshot once
   const orderDoc = {
     customerName: customerName.trim(),
     createdAt: new Date(),
-    items: parsed.map(it => ({
+    items: parsed.map((it) => ({
       productId: it._id.toString(),
       quantity: it.quantity,
       name: it.product.name,
@@ -467,7 +580,8 @@ app.post("/orders", async (req, res) => {
 
   const insert = await ordersCol().insertOne(orderDoc);
 
-  res.status(201)
+  return res
+    .status(201)
     .set("Location", `/orders/${insert.insertedId.toString()}`)
     .json({
       _id: insert.insertedId,
@@ -482,8 +596,8 @@ app.get("/orders", async (req, res) => {
     .sort({ createdAt: -1 })
     .toArray();
 
-  res.json(
-    orders.map(o => ({
+  return res.json(
+    orders.map((o) => ({
       _id: o._id,
       customerName: o.customerName,
       createdAt: o.createdAt,
@@ -500,7 +614,7 @@ app.get("/orders/:id", async (req, res) => {
 
     if (!order) return res.status(404).json({ error: "Order not found." });
 
-    res.json({
+    return res.json({
       _id: order._id,
       customerName: order.customerName,
       createdAt: order.createdAt,
@@ -517,7 +631,7 @@ app.get("/orders/:id", async (req, res) => {
  * 2) GET /:datasetName/pages/:pageId
  */
 
-// Popular pages: top 10 by incoming link count
+// Popular pages: top 10 by unique incoming link count
 app.get("/:datasetName/popular", async (req, res) => {
   const datasetName = req.params.datasetName;
   const base = `${req.protocol}://${req.get("host")}`;
@@ -526,19 +640,11 @@ app.get("/:datasetName/popular", async (req, res) => {
     const top10 = await linksCol()
       .aggregate([
         { $match: { dataset: datasetName } },
-
-        // exclude self-links
         { $match: { $expr: { $ne: ["$from", "$to"] } } },
-
-        // unique incoming sources (dedupe by from->to)
         { $group: { _id: { to: "$to", from: "$from" } } },
         { $group: { _id: "$_id.to", incomingCount: { $sum: 1 } } },
-
-        // deterministic ordering
         { $sort: { incomingCount: -1, _id: 1 } },
         { $limit: 10 },
-
-        // join to pages to get the page document _id for this dataset+url
         {
           $lookup: {
             from: "pages",
@@ -574,14 +680,14 @@ app.get("/:datasetName/popular", async (req, res) => {
       };
     });
 
-    res.json({ result });
+    return res.json({ result });
   } catch (err) {
     console.error("Error in /popular:", err);
-    res.status(500).json({ error: "Failed to compute popular pages." });
+    return res.status(500).json({ error: "Failed to compute popular pages." });
   }
 });
 
-// Page details: original URL + list of incoming links
+// Page details: original URL + list of unique incoming links
 app.get("/:datasetName/pages/:pageId", async (req, res) => {
   const datasetName = req.params.datasetName;
   const pageId = req.params.pageId;
@@ -593,7 +699,6 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
 
     const _id = new ObjectId(pageId);
 
-    // Find the page doc to get its original crawled URL
     const page = await pagesCol().findOne(
       { _id, dataset: datasetName },
       { projection: { url: 1 } }
@@ -603,52 +708,38 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
       return res.status(404).json({ error: "Page not found." });
     }
 
-    // Incoming links are link docs where `to` == this page's url
     const incoming = await linksCol()
-      .find(
-        { dataset: datasetName, to: page.url },
-        { projection: { from: 1, _id: 0 } }
-      )
+      .find({ dataset: datasetName, to: page.url }, { projection: { from: 1, _id: 0 } })
       .toArray();
 
-    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+    const incomingLinks = [...new Set(incoming.map((x) => x.from))];
 
-    res.json({
-      webUrl: page.url,
-      incomingLinks
-    });
+    return res.json({ webUrl: page.url, incomingLinks });
   } catch (err) {
     console.error("Error in /pages/:pageId:", err);
-    res.status(500).json({ error: "Failed to fetch page details." });
+    return res.status(500).json({ error: "Failed to fetch page details." });
   }
 });
 
-// Optional fallback if /popular couldn't find the page doc by _id
+// Optional fallback by URL
 app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   const datasetName = req.params.datasetName;
   const webUrl = decodeURIComponent(req.params.encodedUrl);
 
   try {
     const incoming = await linksCol()
-      .find(
-        { dataset: datasetName, to: webUrl },
-        { projection: { from: 1, _id: 0 } }
-      )
+      .find({ dataset: datasetName, to: webUrl }, { projection: { from: 1, _id: 0 } })
       .toArray();
 
-    const incomingLinks = [...new Set(incoming.map(x => x.from))];
+    const incomingLinks = [...new Set(incoming.map((x) => x.from))];
 
-    res.json({
-      webUrl,
-      incomingLinks
-    });
+    return res.json({ webUrl, incomingLinks });
   } catch (err) {
     console.error("Error in /pages/byUrl:", err);
-    res.status(500).json({ error: "Failed to fetch page details." });
+    return res.status(500).json({ error: "Failed to fetch page details." });
   }
 });
 
-// PageRank value by URL (plain text) and store PR to DB
 app.get("/pageranks", async (req, res) => {
   try {
     const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
@@ -656,257 +747,48 @@ app.get("/pageranks", async (req, res) => {
       return res.status(400).type("text/plain").send("Missing query parameter url");
     }
 
-    const page = await pagesCol().findOne({ url }, { projection: { url: 1, dataset: 1 } });
+    // dataset lookup (fast)
+    const page = await pagesCol().findOne({ url }, { projection: { dataset: 1 } });
     if (!page) {
       return res.status(404).type("text/plain").send("URL not found");
     }
 
     const datasetName = page.dataset;
+    const st = getDatasetState(datasetName);
 
-    let prMap = pagerankCache.get(datasetName);
-    if (!prMap) {
-      prMap = await computePageRanksForDataset(datasetName);
-      if (!prMap) return res.status(404).type("text/plain").send("Dataset not found");
-
-      // Add PageRank to DB
-      const bulk = [];
-      for (const [u, pr] of prMap.entries()) {
-        bulk.push({
-          updateOne: {
-            filter: { dataset: datasetName, url: u },
-            update: { $set: { pr } },
-          },
-        });
-      }
-      if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
-
-      pagerankCache.set(datasetName, prMap);
+    // If cache not ready, warm in background and return 0 quickly (graceful).
+    if (!st.ready) {
+      warmDataset(datasetName);
+      return res.type("text/plain").send("0");
     }
 
-    const score = prMap.get(url);
+    const score = st.prMap.get(url);
     if (score === undefined) return res.status(404).type("text/plain").send("URL not found");
 
-    res.type("text/plain").send(String(score));
+    return res.type("text/plain").send(String(score));
   } catch (err) {
     console.error("Pagerank error:", err);
-    res.status(500).type("text/plain").send("Internal server error");
+    return res.status(500).type("text/plain").send("Internal server error");
   }
 });
 
-// Page details for UI (optional)
-app.get("/page", async (req, res) => {
-  try {
-    const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
-    if (!url) return res.status(400).json({ error: "Missing query parameter url" });
+// Search routes
+app.get("/fruitsA", makeSearchHandler("fruitsA"));
+app.get("/personal", makeSearchHandler("personal"));
+app.get("/:datasetName", makeSearchHandler(null));
 
-    const page = await pagesCol().findOne(
-      { url },
-      { projection: { _id: 0, dataset: 1, url: 1, title: 1, termFreq: 1, wordCount: 1, pr: 1, outLinks: 1 } }
-    );
-    if (!page) return res.status(404).json({ error: "URL not found" });
-
-    if (typeof page.pr !== "number") {
-      const prMap = pagerankCache.get(page.dataset) || await computePageRanksForDataset(page.dataset);
-      if (prMap) {
-        const bulk = [];
-        for (const [u, pr] of prMap.entries()) {
-          bulk.push({ updateOne: { filter: { dataset: page.dataset, url: u }, update: { $set: { pr } } } });
-        }
-        if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
-        pagerankCache.set(page.dataset, prMap);
-        page.pr = prMap.get(url) ?? 0;
-      } else {
-        page.pr = 0;
-      }
-    }
-
-    const incoming = await linksCol()
-      .find({ dataset: page.dataset, to: url }, { projection: { from: 1, _id: 0 } })
-      .toArray();
-
-    const outgoing = await linksCol()
-      .find({ dataset: page.dataset, from: url }, { projection: { to: 1, _id: 0 } })
-      .toArray();
-
-    res.json({
-      url: page.url,
-      title: safeTitle(page),
-      pr: page.pr ?? 0,
-      incomingLinks: [...new Set(incoming.map(x => x.from))],
-      outgoingLinks: [...new Set(outgoing.map(x => x.to))],
-      wordCount: page.wordCount ?? 0,
-      termFreq: page.termFreq || {},
-      outLinks: page.outLinks || []
-    });
-  } catch (err) {
-    console.error("Error in /page:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Search endpoint for datasets (supports q, boost, limit; returns url, score, title, pr)
-app.get('/:datasetName', async (req, res) => {
-  try {
-    const datasetName = req.params.datasetName;
-
-    // Support q and phrase; assignment specifies q
-    const queryText =
-      (typeof req.query.q === "string" ? req.query.q : "") ||
-      (typeof req.query.phrase === "string" ? req.query.phrase : "");
-
-    const boost = parseBoost(req.query.boost);
-    const limit = parseLimit(req.query.limit);
-
-    const dataset = await pagesCol()
-      .find({ dataset: datasetName })
-      .toArray();
-
-    if (!dataset.length) {
-      return res.status(404).json({ error: "Dataset not found" });
-    }
-
-    // Ensure PR is available (required pr field; also needed for boost)
-    if (!pagerankCache.has(datasetName)) {
-      const prMap = await computePageRanksForDataset(datasetName);
-      if (prMap) {
-        const bulk = [];
-        for (const [u, pr] of prMap.entries()) {
-          bulk.push({
-            updateOne: { filter: { dataset: datasetName, url: u }, update: { $set: { pr } } }
-          });
-        }
-        if (bulk.length) await pagesCol().bulkWrite(bulk, { ordered: false });
-        pagerankCache.set(datasetName, prMap);
-      }
-    }
-
-    // If no query, MUST return exactly limit results with score=0
-    if (!queryText || !queryText.trim().length) {
-      const out = dataset.slice(0, limit).map(p => ({
-        url: p.url,
-        score: 0,
-        title: safeTitle(p),
-        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
-      }));
-      return res.json({ result: out });
-    }
-
-    const documentFrequency = {};
-    for (const page of dataset) {
-      for (const word of Object.keys(page.termFreq || {})) {
-        documentFrequency[word] = (documentFrequency[word] || 0) + 1;
-      }
-    }
-
-    const idf = {};
-    const totalDocuments = dataset.length;
-    for (const [word, df] of Object.entries(documentFrequency)) {
-      idf[word] = Math.max(0, Math.log2(totalDocuments / (1 + df)));
-    }
-
-    const rawQueryWords = queryText
-      .toLowerCase()
-      .split(/\W+/)
-      .filter(w => w.length > 0);
-
-    // If tokenizer yields nothing, return any limit docs with score 0
-    if (rawQueryWords.length === 0) {
-      const out = dataset.slice(0, limit).map(p => ({
-        url: p.url,
-        score: 0,
-        title: safeTitle(p),
-        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
-      }));
-      return res.json({ result: out });
-    }
-
-    const queryLength = rawQueryWords.length;
-
-    const queryFrequency = {};
-    for (const word of rawQueryWords) {
-      queryFrequency[word] = (queryFrequency[word] || 0) + 1;
-    }
-
-    const vocabulary = Object.keys(queryFrequency).filter(word => (idf[word] || 0) > 0);
-
-    // If all query terms have idf==0, scores will be 0; still return limit docs
-    if (vocabulary.length === 0) {
-      const out = dataset.slice(0, limit).map(p => ({
-        url: p.url,
-        score: 0,
-        title: safeTitle(p),
-        pr: (typeof p.pr === "number") ? p.pr : (pagerankCache.get(datasetName)?.get(p.url) ?? 0)
-      }));
-      return res.json({ result: out });
-    }
-
-    const queryVector = [];
-    let queryMagSquared = 0;
-    for (const word of vocabulary) {
-      const tf = queryFrequency[word] / queryLength;
-      const tfidf = Math.log2(1 + tf) * idf[word];
-      queryVector.push(tfidf);
-      queryMagSquared += tfidf * tfidf;
-    }
-
-    const queryMagnitude = Math.sqrt(queryMagSquared);
-
-    const results = [];
-    for (const page of dataset) {
-      let dot = 0;
-      let pageMagSquared = 0;
-
-      for (let i = 0; i < vocabulary.length; i++) {
-        const word = vocabulary[i];
-
-        const freq = (page.termFreq && page.termFreq[word]) ? page.termFreq[word] : 0;
-        const wc = page.wordCount || 0;
-        const tf = wc > 0 ? (freq / wc) : 0;
-        const tfidf = Math.log2(1 + tf) * idf[word];
-
-        dot += tfidf * queryVector[i];
-        pageMagSquared += tfidf * tfidf;
-      }
-
-      const pageMagnitude = Math.sqrt(pageMagSquared);
-
-      const baseScore =
-        pageMagnitude === 0 || queryMagnitude === 0
-          ? 0
-          : dot / (pageMagnitude * queryMagnitude);
-
-      const pr = (typeof page.pr === "number") ? page.pr : (pagerankCache.get(datasetName)?.get(page.url) ?? 0);
-      const finalScore = boost ? (baseScore * (1 + pr)) : baseScore;
-
-      results.push({
-        url: page.url,
-        score: finalScore,
-        title: safeTitle(page),
-        pr
-      });
-    }
-
-    results.sort((a, b) => (b.score - a.score) || a.url.localeCompare(b.url));
-
-    // MUST return exactly limit results (fruitsA dataset has 100 pages, limit max 50)
-    res.json({
-      result: results.slice(0, limit)
-    });
-
-  } catch (err) {
-    console.error("Search error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Start the server after connecting to the database
 connectDB()
   .then(() => {
+    // Start listening immediately
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server listening on port ${PORT}`);
     });
+
+    // Warm datasets in background (do not block listening)
+    warmDataset("fruitsA");
+    warmDataset("personal");
   })
-  .catch(err => {
+  .catch((err) => {
     console.error("Failed to connect to MongoDB:", err);
     process.exit(1);
   });
