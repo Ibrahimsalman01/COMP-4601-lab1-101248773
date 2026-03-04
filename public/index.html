@@ -15,6 +15,29 @@
     </header>
 
     <div class="card">
+        <h2>Page Search</h2>
+        <div class="row">
+            <select id="dataset">
+                <option value="fruitsA">FruitsA</option>
+                <option value="personal">Personal</option>
+            </select>
+            <input id="pageSearch" placeholder="Search query" />
+            <input 
+            id="resultLimit" 
+            type="number" 
+            min="1" 
+            placeholder="Number of results" 
+            style="width: 150px;"/>
+            <select id="boostSearch">
+                <option value="false">default search</option>
+                <option value="true">boosted search</option>
+            </select>
+            <button id="btnPageSearch">Search</button>
+        </div>
+        <div id="pageSearchOutput" class="search-results">(results)</div>
+    </div>
+
+    <div class="card">
         <h2>Search</h2>
         <div class="row">
             <input id="searchName" placeholder="name contains..." />

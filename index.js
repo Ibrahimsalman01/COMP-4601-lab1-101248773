@@ -687,6 +687,67 @@ app.get("/:datasetName/popular", async (req, res) => {
   }
 });
 
+function pageToHtml(webUrl, incomingLinks, outgoingLinks, wordFrequency, datasetName, title) {
+  const displayTitle = (title && title.trim()) || (() => {
+    try {
+      const parts = new URL(webUrl).pathname.split("/").filter(Boolean);
+      return parts[parts.length - 1] || webUrl;
+    } catch { return webUrl; }
+  })();
+
+  const wordRows = Object.entries(wordFrequency)
+    .sort((a, b) => b[1] - a[1])
+    .map(([word, count]) => `<li><code>${escapeHtml(word)}</code>: ${count}</li>`)
+    .join("");
+
+  const incomingItems = incomingLinks.length
+    ? incomingLinks.map((l) => `<li><a href="${escapeHtml(l)}">${escapeHtml(l)}</a></li>`).join("")
+    : "<li><i>None</i></li>";
+
+  const outgoingItems = outgoingLinks.length
+    ? outgoingLinks.map((l) => `<li><a href="${escapeHtml(l)}">${escapeHtml(l)}</a></li>`).join("")
+    : "<li><i>None</i></li>";
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Page Details</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .card { border: 1px solid #ddd; padding: 16px; border-radius: 8px; max-width: 640px; }
+    code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Page Details</h1>
+    <p><b>Title:</b> ${escapeHtml(displayTitle)}</p>
+    <p><b>URL:</b> <a href="${escapeHtml(webUrl)}">${escapeHtml(webUrl)}</a></p>
+    <p><b>Incoming Links:</b> ${incomingLinks.length}</p>
+    <p><b>Outgoing Links:</b> ${outgoingLinks.length}</p>
+
+    <h2>Incoming Links</h2>
+    <ul>${incomingItems}</ul>
+
+    <h2>Outgoing Links</h2>
+    <ul>${outgoingItems}</ul>
+
+    <h2>Word Frequency</h2>
+    <ul>${wordRows || "<li><i>No words indexed.</i></li>"}</ul>
+
+    <h2>Links</h2>
+    <ul>
+      <li><a href="/index.html">Back to client</a></li>
+    </ul>
+
+    <h2>JSON representation</h2>
+    <p>Request this same URL with <code>Accept: application/json</code>.</p>
+  </div>
+</body>
+</html>`;
+}
+
 // Page details: original URL + list of unique incoming links
 app.get("/:datasetName/pages/:pageId", async (req, res) => {
   const datasetName = req.params.datasetName;
@@ -701,7 +762,7 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
 
     const page = await pagesCol().findOne(
       { _id, dataset: datasetName },
-      { projection: { url: 1 } }
+      { projection: { url: 1, outLinks: 1, termFreq: 1, title: 1 } }
     );
 
     if (!page) {
@@ -713,8 +774,14 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
       .toArray();
 
     const incomingLinks = [...new Set(incoming.map((x) => x.from))];
+    const outgoingLinks = page.outLinks || [];
+    const wordFrequency = page.termFreq || {};
 
-    return res.json({ webUrl: page.url, incomingLinks });
+    return res.format({
+      "application/json": () => res.json({ webUrl: page.url, incomingLinks, outgoingLinks, wordFrequency }),
+      "text/html": () => res.type("html").send(pageToHtml(page.url, incomingLinks, outgoingLinks, wordFrequency, datasetName, page.title)),
+      default: () => res.status(406).send("Not Acceptable"),
+    });
   } catch (err) {
     console.error("Error in /pages/:pageId:", err);
     return res.status(500).json({ error: "Failed to fetch page details." });
@@ -727,13 +794,24 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   const webUrl = decodeURIComponent(req.params.encodedUrl);
 
   try {
+    const page = await pagesCol().findOne(
+      { dataset: datasetName, url: webUrl },
+      { projection: { outLinks: 1, termFreq: 1, title: 1 } }
+    );
+
     const incoming = await linksCol()
       .find({ dataset: datasetName, to: webUrl }, { projection: { from: 1, _id: 0 } })
       .toArray();
 
     const incomingLinks = [...new Set(incoming.map((x) => x.from))];
+    const outgoingLinks = page?.outLinks || [];
+    const wordFrequency = page?.termFreq || {};
 
-    return res.json({ webUrl, incomingLinks });
+    return res.format({
+      "application/json": () => res.json({ webUrl, incomingLinks, outgoingLinks, wordFrequency }),
+      "text/html": () => res.type("html").send(pageToHtml(webUrl, incomingLinks, outgoingLinks, wordFrequency, datasetName, page?.title)),
+      default: () => res.status(406).send("Not Acceptable"),
+    });
   } catch (err) {
     console.error("Error in /pages/byUrl:", err);
     return res.status(500).json({ error: "Failed to fetch page details." });
