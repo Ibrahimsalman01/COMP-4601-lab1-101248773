@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const crawlerPkg = require("crawler");
@@ -32,8 +31,7 @@ function siteRootFromSeed(dataset, seed) {
     return `${u.origin}/~avamckenney/`;
   }
 
-  // UPDATED: allow the crawl to expand to the entire SCS section
-  // e.g. https://carleton.ca/scs and https://carleton.ca/scs/...
+  // allow the crawl to expand to the entire SCS section
   return `${u.origin}/scs`;
 }
 
@@ -56,9 +54,10 @@ function isAllowedUrl(dataset, urlStr, root) {
       const path = u.pathname.toLowerCase();
 
       // Block WordPress/admin/API endpoints (these cause redirects/403/bloat)
+      // IMPORTANT: no trailing slashes; normalize checks below.
       const blockedExactOrPrefix = [
-        "/scs/technical-support/",
-        "/scs/tech-support/",
+        "/scs/technical-support",
+        "/scs/tech-support",
         "/scs/wp-login.php",
         "/scs/wp-admin",
         "/scs/wp-json",
@@ -156,6 +155,11 @@ async function crawlDataset(dataset) {
       retries: 1,
       retryInterval: 1000,
 
+      // helps avoid some WP/CDN treating crawler as broken
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; COMP4601Bot/1.0; +https://carleton.ca/)",
+      },
+
       callback: async (error, res, done) => {
         try {
           const rawUrl = res?.options?.url ?? res?.options?.uri;
@@ -169,6 +173,18 @@ async function crawlDataset(dataset) {
           seen.add(url);
 
           const reachedCap = seen.size >= MAX_PAGES;
+
+          const status = res?.statusCode || 0;
+
+          // Follow redirects by enqueuing Location target (WP does this a lot)
+          if (status >= 300 && status < 400 && res?.headers?.location) {
+            try {
+              const redirected = normalizeUrl(new URL(res.headers.location, url).toString());
+              if (isAllowedUrl(dataset, redirected, siteRoot) && !seen.has(redirected) && !bad.has(redirected)) {
+                enqueue(c, redirected);
+              }
+            } catch {}
+          }
 
           if (error) {
             bad.add(url);
@@ -192,8 +208,6 @@ async function crawlDataset(dataset) {
             );
             return;
           }
-
-          const status = res.statusCode || 0;
 
           if (status === 404 || status === 403 || status === 410) {
             bad.add(url);
@@ -277,7 +291,9 @@ async function crawlDataset(dataset) {
 
   console.log(`Done crawling dataset: ${dataset}. Pages seen: ${seen.size}`);
   if (dataset === "personal" && seen.size < 500) {
-    console.warn(`WARNING: personal dataset only reached ${seen.size} pages (< 500). Consider broadening root to https://carleton.ca/ with a whitelist.`);
+    console.warn(
+      `WARNING: personal dataset only reached ${seen.size} pages (< 500). Consider broadening root to https://carleton.ca/ with a whitelist.`
+    );
   }
 }
 
