@@ -8,7 +8,10 @@ const { connectDB, pagesCol, linksCol } = require("./db");
 const DATASETS = {
   tinyfruits: "https://people.scs.carleton.ca/~avamckenney/tinyfruits/N-0.html",
   fruits100: "https://people.scs.carleton.ca/~avamckenney/fruits100/N-0.html",
-  fruitsA: "https://people.scs.carleton.ca/~avamckenney/fruitsA/N-0.html"
+  fruitsA: "https://people.scs.carleton.ca/~avamckenney/fruitsA/N-0.html",
+
+  // Seed can stay at our-people, but we allow the crawl to expand under /scs/*
+  personal: "https://carleton.ca/scs/our-people",
 };
 
 function normalizeUrl(u) {
@@ -20,9 +23,68 @@ function normalizeUrl(u) {
   return s;
 }
 
-function siteRootFromSeed(seed) {
+function siteRootFromSeed(dataset, seed) {
   const u = new URL(seed);
-  return `${u.origin}/~avamckenney/`;
+
+  if (dataset !== "personal") {
+    // Restrict to AVA datasets
+    return `${u.origin}/~avamckenney/`;
+  }
+
+  // allow the crawl to expand to the entire SCS section
+  return `${u.origin}/scs`;
+}
+
+function isAllowedUrl(dataset, urlStr, root) {
+  if (!urlStr.startsWith(root)) return false;
+
+  if (dataset === "personal") {
+    try {
+      const u = new URL(urlStr);
+
+      // Must remain under /scs or /scs/...
+      if (!(u.pathname === "/scs" || u.pathname.startsWith("/scs/"))) return false;
+
+      // Allow query params EXCEPT common tracking params (needed for WP pagination on some pages)
+      const badParams = ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"];
+      for (const p of badParams) {
+        if (u.searchParams.has(p)) return false;
+      }
+
+      const path = u.pathname.toLowerCase();
+
+      // Block WordPress/admin/API endpoints (these cause redirects/403/bloat)
+      // IMPORTANT: no trailing slashes; normalize checks below.
+      const blockedExactOrPrefix = [
+        "/scs/technical-support",
+        "/scs/tech-support",
+        "/scs/wp-login.php",
+        "/scs/wp-admin",
+        "/scs/wp-json",
+        "/scs/xmlrpc.php",
+      ];
+      if (blockedExactOrPrefix.some((p) => path === p || path.startsWith(p + "/"))) {
+        return false;
+      }
+
+      // Avoid non-HTML resources
+      const blockedExt = [
+        ".zip", ".rar", ".7z", ".tar", ".gz",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+        ".mp4", ".mov", ".avi",
+        ".mp3", ".wav",
+        ".css", ".js",
+        ".json", ".xml", ".pdf",
+      ];
+      if (blockedExt.some((ext) => path.endsWith(ext))) return false;
+
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function extractLinksFromCheerio($, baseUrl) {
@@ -79,8 +141,12 @@ async function crawlDataset(dataset) {
   await connectDB();
   await ensureIndexes();
 
-  const siteRoot = siteRootFromSeed(seed);
+  const siteRoot = siteRootFromSeed(dataset, seed);
   const seen = new Set();
+  const bad = new Set();
+
+  // For personal you need >= 500 pages; use a larger cap but safe default.
+  const MAX_PAGES = dataset === "personal" ? 4000 : 2500;
 
   await new Promise((resolve, reject) => {
     const c = new Crawler({
@@ -89,22 +155,39 @@ async function crawlDataset(dataset) {
       retries: 1,
       retryInterval: 1000,
 
+      // helps avoid some WP/CDN treating crawler as broken
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; COMP4601Bot/1.0; +https://carleton.ca/)",
+      },
+
       callback: async (error, res, done) => {
         try {
-          // node-crawler may store URL in options.url or options.uri depending on version
           const rawUrl = res?.options?.url ?? res?.options?.uri;
           if (!rawUrl) return;
 
           const url = normalizeUrl(rawUrl);
 
-          // Hard boundary
-          if (!url.startsWith(siteRoot)) return;
+          if (!isAllowedUrl(dataset, url, siteRoot)) return;
 
-          // De-dupe
-          if (seen.has(url)) return;
+          if (seen.has(url) || bad.has(url)) return;
           seen.add(url);
 
+          const reachedCap = seen.size >= MAX_PAGES;
+
+          const status = res?.statusCode || 0;
+
+          // Follow redirects by enqueuing Location target (WP does this a lot)
+          if (status >= 300 && status < 400 && res?.headers?.location) {
+            try {
+              const redirected = normalizeUrl(new URL(res.headers.location, url).toString());
+              if (isAllowedUrl(dataset, redirected, siteRoot) && !seen.has(redirected) && !bad.has(redirected)) {
+                enqueue(c, redirected);
+              }
+            } catch {}
+          }
+
           if (error) {
+            bad.add(url);
             await pagesCol().updateOne(
               { dataset, url },
               {
@@ -126,7 +209,11 @@ async function crawlDataset(dataset) {
             return;
           }
 
-          const status = res.statusCode || 0;
+          if (status === 404 || status === 403 || status === 410) {
+            bad.add(url);
+            return;
+          }
+
           const body =
             typeof res.body === "string"
               ? res.body
@@ -140,11 +227,16 @@ async function crawlDataset(dataset) {
           let wordCount = 0;
 
           if (status === 200 && res.$) {
-            outLinks = extractLinksFromCheerio(res.$, url).filter((to) => to.startsWith(siteRoot));
-            ({ paragraphText, termFreq, wordCount } = extractParagraphIndexFromCheerio(res.$));
+            outLinks = extractLinksFromCheerio(res.$, url).filter((to) =>
+              isAllowedUrl(dataset, to, siteRoot)
+            );
+
+            ({ paragraphText, termFreq, wordCount } =
+              extractParagraphIndexFromCheerio(res.$));
+          } else {
+            outLinks = [];
           }
 
-          // Store page (including paragraph-only index fields)
           await pagesCol().updateOne(
             { dataset, url },
             {
@@ -163,7 +255,6 @@ async function crawlDataset(dataset) {
             { upsert: true }
           );
 
-          // Store edges (exclude self-links)
           if (outLinks.length) {
             const edges = outLinks
               .filter((to) => to !== url)
@@ -177,9 +268,11 @@ async function crawlDataset(dataset) {
                 });
             }
 
-            // Enqueue discovered links
-            for (const link of outLinks) {
-              if (!seen.has(link) && link.startsWith(siteRoot)) enqueue(c, link);
+            // Keep enqueuing until cap reached
+            if (!reachedCap) {
+              for (const link of outLinks) {
+                if (!seen.has(link) && !bad.has(link)) enqueue(c, link);
+              }
             }
           }
         } catch (e) {
@@ -196,13 +289,18 @@ async function crawlDataset(dataset) {
     enqueue(c, seed);
   });
 
-  console.log(`Done crawling dataset: ${dataset}`);
+  console.log(`Done crawling dataset: ${dataset}. Pages seen: ${seen.size}`);
+  if (dataset === "personal" && seen.size < 500) {
+    console.warn(
+      `WARNING: personal dataset only reached ${seen.size} pages (< 500). Consider broadening root to https://carleton.ca/ with a whitelist.`
+    );
+  }
 }
 
 async function main() {
   const arg = process.argv[2];
   if (!arg) {
-    console.log("Usage: node crawler.js <tinyfruits|fruits100|fruitsA|fruitgraph|all>");
+    console.log("Usage: node crawler.js <tinyfruits|fruits100|fruitsA|personal|all>");
     process.exit(1);
   }
 

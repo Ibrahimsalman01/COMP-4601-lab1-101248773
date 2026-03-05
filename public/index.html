@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>Lab 1 Client</title>
+    <title>Assignment 1 Client</title>
     <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -13,6 +13,29 @@
         <h1>User Actions</h1>
         <p class="subtitle">Search, create products, and manage reviews.</p>
     </header>
+
+    <div class="card">
+        <h2>Page Search</h2>
+        <div class="row">
+            <select id="dataset">
+                <option value="fruitsA">FruitsA</option>
+                <option value="personal">Personal</option>
+            </select>
+            <input id="pageSearch" placeholder="Search query" />
+            <input 
+            id="resultLimit" 
+            type="number" 
+            min="1" 
+            placeholder="Number of results" 
+            style="width: 150px;"/>
+            <select id="boostSearch">
+                <option value="false">default search</option>
+                <option value="true">boosted search</option>
+            </select>
+            <button id="btnPageSearch">Search</button>
+        </div>
+        <div id="pageSearchOutput" class="search-results">(results)</div>
+    </div>
 
     <div class="card">
         <h2>Search</h2>

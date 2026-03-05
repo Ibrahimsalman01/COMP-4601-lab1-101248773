@@ -171,7 +171,69 @@ a:hover {
   text-decoration: underline;
 }
 
-/* ---------- Small screens ---------- */
+/* ---------- Search result cards ---------- */
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.result-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.result-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.result-url {
+  font-size: 12px;
+  color: rgba(51, 214, 166, 0.75);
+  word-break: break-all;
+}
+
+.result-meta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.result-meta b {
+  color: var(--text);
+}
+
+.detail-link {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(124, 92, 255, 0.35);
+  background: rgba(124, 92, 255, 0.12);
+  color: rgba(124, 92, 255, 0.95);
+  text-decoration: none;
+  transition: background 140ms, border-color 140ms;
+}
+
+.detail-link:hover {
+  background: rgba(124, 92, 255, 0.22);
+  border-color: rgba(124, 92, 255, 0.6);
+  text-decoration: none;
+}
 @media (max-width: 560px) {
   h1 { font-size: 24px; }
   input, select { min-width: 100%; }
