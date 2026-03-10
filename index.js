@@ -1,9 +1,14 @@
 require("dotenv").config();
 const { connectDB, productsCol, ordersCol, pagesCol, linksCol } = require("./db");
 const { ObjectId } = require("mongodb");
-
 const express = require("express");
 const path = require("path");
+const { loadDatasetFromFile, getTruthOrGuess } = require("./recommender");
+const DATASET_FILES = {
+  test: path.join(__dirname, "test.txt"),
+  test2: path.join(__dirname, "test2.txt"),
+  test3: path.join(__dirname, "test3.txt"),
+};
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -858,7 +863,43 @@ app.get("/pageranks", async (req, res) => {
   }
 });
 
-// Search routes
+// Lab 6 /recommendations/:datasetName?type=user&user=...&item=...
+app.get("/recommendations/:datasetName", async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+
+    const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
+    const user = typeof req.query.user === "string" ? req.query.user.trim() : "";
+    const item = typeof req.query.item === "string" ? req.query.item.trim() : "";
+
+    if (!type || !user || !item) {
+      return res.status(400).json({ error: "Missing required query parameters: type, user, item" });
+    }
+    if (type !== "user") {
+      return res.status(400).json({ error: "Only type=user is supported for this lab" });
+    }
+
+    const filePath = DATASET_FILES[datasetName];
+    if (!filePath) {
+      return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
+    }
+
+    const ds = await loadDatasetFromFile(datasetName, filePath);
+
+    // neighbourhood size parameter
+    const k = 2;
+
+    const result = getTruthOrGuess(ds, user, item, k);
+    if (result.error) return res.status(400).json({ error: result.error });
+
+    return res.json(result); // { score: <float>, source: "truth"|"guess" }
+  } catch (e) {
+    console.error("recommendations error:", e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Assignment 1 Search Routes
 app.get("/fruitsA", makeSearchHandler("fruitsA"));
 app.get("/personal", makeSearchHandler("personal"));
 app.get("/:datasetName", makeSearchHandler(null));
