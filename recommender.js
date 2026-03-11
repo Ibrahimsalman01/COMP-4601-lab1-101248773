@@ -198,12 +198,11 @@ function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
 
     const sim = ds.getUserSim(u, v);
 
-    // keep positive similarities only
-    if (sim > 0) {
-      candidates.push({ v, sim, rating: neighborRating });
-    }
+    // keep all similarities, including negative ones
+    candidates.push({ v, sim, rating: neighborRating });
   }
 
+  // choose the top-k most similar users by similarity descending
   candidates.sort((a, b) => b.sim - a.sim);
   const neighbors = candidates.slice(0, k);
 
@@ -218,7 +217,7 @@ function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
 
   for (const n of neighbors) {
     num += n.sim * (n.rating - ds.userMeans[n.v]);
-    den += Math.abs(n.sim);
+    den += n.sim;
   }
 
   if (den === 0) {
