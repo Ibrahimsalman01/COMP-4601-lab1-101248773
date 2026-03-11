@@ -3,11 +3,18 @@ const { connectDB, productsCol, ordersCol, pagesCol, linksCol } = require("./db"
 const { ObjectId } = require("mongodb");
 const express = require("express");
 const path = require("path");
-const { loadDatasetFromFile, getTruthOrGuess } = require("./recommender");
+
+const {
+  loadDatasetFromFile,
+  getUserBasedTruthOrGuess,
+  getItemBasedTruthOrGuess,
+} = require("./recommender");
+
 const DATASET_FILES = {
   test: path.join(__dirname, "test.txt"),
   test2: path.join(__dirname, "test2.txt"),
   test3: path.join(__dirname, "test3.txt"),
+  test4: path.join(__dirname, "testa.txt")
 };
 
 const app = express();
@@ -875,9 +882,6 @@ app.get("/recommendations/:datasetName", async (req, res) => {
     if (!type || !user || !item) {
       return res.status(400).json({ error: "Missing required query parameters: type, user, item" });
     }
-    if (type !== "user") {
-      return res.status(400).json({ error: "Only type=user is supported for this lab" });
-    }
 
     const filePath = DATASET_FILES[datasetName];
     if (!filePath) {
@@ -885,14 +889,24 @@ app.get("/recommendations/:datasetName", async (req, res) => {
     }
 
     const ds = await loadDatasetFromFile(datasetName, filePath);
-
-    // neighbourhood size parameter
     const k = 2;
 
-    const result = getTruthOrGuess(ds, user, item, k);
-    if (result.error) return res.status(400).json({ error: result.error });
+    let result;
+    if (type === "item") {
+      result = getItemBasedTruthOrGuess(ds, user, item, k);
+    }
+    else if (type === "user") {
+      result = getUserBasedTruthOrGuess(ds, user, item, k);
+    }
+    else {
+      return res.status(400).json({ error: "type must be 'user' or 'item'" });
+    }
 
-    return res.json(result); // { score: <float>, source: "truth"|"guess" }
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    return res.json(result);
   } catch (e) {
     console.error("recommendations error:", e);
     return res.status(500).json({ error: "Internal server error" });
