@@ -8,13 +8,15 @@ const {
   loadDatasetFromFile,
   getUserBasedTruthOrGuess,
   getItemBasedTruthOrGuess,
+  computeMAE,
 } = require("./recommender");
 
 const DATASET_FILES = {
   test: path.join(__dirname, "test.txt"),
   test2: path.join(__dirname, "test2.txt"),
   test3: path.join(__dirname, "test3.txt"),
-  test4: path.join(__dirname, "testa.txt")
+  test4: path.join(__dirname, "testa.txt"),
+  "parsed-data-trimmed": path.join(__dirname, "parsed-data-trimmed.txt"),
 };
 
 const app = express();
@@ -909,6 +911,32 @@ app.get("/recommendations/:datasetName", async (req, res) => {
     return res.json(result);
   } catch (e) {
     console.error("recommendations error:", e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Lab 8 MAE evaluation via Leave-One-Out cross-validation
+const maeCache = new Map();
+
+app.get("/mae/:datasetName", async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+    const filePath = DATASET_FILES[datasetName];
+    if (!filePath) {
+      return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
+    }
+
+    if (maeCache.has(datasetName)) {
+      return res.json(maeCache.get(datasetName));
+    }
+
+    const ds = await loadDatasetFromFile(datasetName, filePath);
+    const result = await computeMAE(ds, 5, "user");
+    const response = { ...result, dataset: datasetName };
+    maeCache.set(datasetName, response);
+    return res.json(response);
+  } catch (e) {
+    console.error("MAE error:", e);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

@@ -3,7 +3,7 @@ const fs = require("fs/promises");
 const datasetCache = new Map();
 
 function isRated(x) {
-  return typeof x === "number" && x >= 0;
+  return typeof x === "number" && x > 0;
 }
 
 function computeUserMeans(ratings) {
@@ -185,7 +185,7 @@ function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
   if (i === undefined) return { error: `Unknown item: ${itemName}` };
 
   const current = ds.ratings[u][i];
-  if (current >= 0) {
+  if (isRated(current)) {
     return { score: current, source: "truth" };
   }
 
@@ -194,7 +194,7 @@ function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
     if (v === u) continue;
 
     const neighborRating = ds.ratings[v][i];
-    if (neighborRating < 0) continue;
+    if (!isRated(neighborRating)) continue;
 
     const sim = ds.getUserSim(u, v);
 
@@ -282,8 +282,99 @@ function getItemBasedTruthOrGuess(ds, userName, itemName, k = 2) {
   };
 }
 
+// -------- Leave-One-Out MAE evaluation --------
+async function computeMAE(ds, k = 5, type = "user") {
+  // Step 1: Pre-warm all user-user similarities using the full dataset.
+  // This must happen BEFORE any LOO mutations so cached values are correct.
+  for (let u = 0; u < ds.N; u++) {
+    for (let v = u + 1; v < ds.N; v++) {
+      ds.getUserSim(u, v);
+    }
+  }
+
+  // Step 2: Build per-user rated-item index (avoids scanning 4423 cols per iteration).
+  const userRatedItems = ds.ratings.map((row) => {
+    const indices = [];
+    for (let j = 0; j < row.length; j++) {
+      if (isRated(row[j])) indices.push(j);
+    }
+    return indices;
+  });
+
+  // Step 3: LOO loop
+  let totalError = 0;
+  let count = 0;
+
+  for (let u = 0; u < ds.N; u++) {
+    const ratedItems = userRatedItems[u];
+
+    for (const i of ratedItems) {
+      const actual = ds.ratings[u][i];
+
+      // Temporarily hide this rating
+      ds.ratings[u][i] = 0;
+
+      // Compute user mean without item i
+      let sum = 0;
+      let cnt = 0;
+      for (const j of ratedItems) {
+        if (j !== i) {
+          sum += ds.ratings[u][j];
+          cnt++;
+        }
+      }
+      const meanWithout = cnt > 0 ? sum / cnt : ds.globalMean;
+
+      // Find candidate neighbours: users who rated item i
+      const candidates = [];
+      for (let v = 0; v < ds.N; v++) {
+        if (v === u) continue;
+        const vRating = ds.ratings[v][i];
+        if (!isRated(vRating)) continue;
+        const sim = ds.getUserSim(u, v);
+        candidates.push({ v, sim, rating: vRating });
+      }
+
+      // Sort by similarity descending, take top-k
+      candidates.sort((a, b) => b.sim - a.sim);
+      const neighbours = candidates.slice(0, k);
+
+      // Predict
+      let predicted;
+      if (neighbours.length === 0) {
+        predicted = meanWithout;
+      } else {
+        let num = 0;
+        let den = 0;
+        for (const n of neighbours) {
+          num += n.sim * (n.rating - ds.userMeans[n.v]);
+          den += n.sim;
+        }
+        predicted = den === 0 ? meanWithout : meanWithout + num / den;
+      }
+
+      // Clamp to valid rating range
+      predicted = Math.max(1, Math.min(5, predicted));
+
+      totalError += Math.abs(predicted - actual);
+      count++;
+
+      // Restore rating
+      ds.ratings[u][i] = actual;
+    }
+  }
+
+  return {
+    mae: count > 0 ? totalError / count : 0,
+    count,
+    k,
+    type,
+  };
+}
+
 module.exports = {
   loadDatasetFromFile,
   getUserBasedTruthOrGuess,
   getItemBasedTruthOrGuess,
+  computeMAE,
 };
