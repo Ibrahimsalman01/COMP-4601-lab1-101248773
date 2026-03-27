@@ -330,6 +330,10 @@ async function computeMAE(ds, k = 5, type = "user") {
       }
       const meanWithout = cnt > 0 ? sum / cnt : ds.globalMean;
 
+      // Temporarily override user u's mean so Pearson recomputes with the LOO mean
+      const savedMean = ds.userMeans[u];
+      ds.userMeans[u] = meanWithout;
+
       // Find candidate neighbours: users who rated item i
       const candidates = [];
       for (let v = 0; v < ds.N; v++) {
@@ -364,7 +368,8 @@ async function computeMAE(ds, k = 5, type = "user") {
       totalError += Math.abs(predicted - actual);
       count++;
 
-      // Restore rating
+      // Restore mean and rating
+      ds.userMeans[u] = savedMean;
       ds.ratings[u][i] = actual;
     }
   }
