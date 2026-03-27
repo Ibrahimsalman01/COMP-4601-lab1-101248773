@@ -4,12 +4,7 @@ const { ObjectId } = require("mongodb");
 const express = require("express");
 const path = require("path");
 
-const {
-  loadDatasetFromFile,
-  getUserBasedTruthOrGuess,
-  getItemBasedTruthOrGuess,
-  computeMAE,
-} = require("./recommender");
+const { loadDatasetFromFile, computeMAE } = require("./recommender");
 
 const DATASET_FILES = {
   test: path.join(__dirname, "test.txt"),
@@ -17,6 +12,7 @@ const DATASET_FILES = {
   test3: path.join(__dirname, "test3.txt"),
   test4: path.join(__dirname, "testa.txt"),
   "parsed-data-trimmed": path.join(__dirname, "parsed-data-trimmed.txt"),
+  assignment2: path.join(__dirname, "assignment2-data.txt"),
 };
 
 const app = express();
@@ -124,16 +120,6 @@ function reviewsToHtml(product) {
 }
 
 // -------------------- Search + PageRank caches --------------------
-/**
- * datasetCache:
- *  name -> {
- *    pages: Array<pageDoc>,
- *    idf: Record<string, number>,
- *    prMap: Map<string,urlPr>,
- *    ready: boolean,
- *    warmingPromise: Promise<void> | null
- *  }
- */
 const datasetCache = new Map();
 
 function getDatasetState(name) {
@@ -166,7 +152,7 @@ function parseLimit(v) {
 }
 
 function safeTitle(page) {
-  const t = (page && typeof page.title === "string") ? page.title.trim() : "";
+  const t = page && typeof page.title === "string" ? page.title.trim() : "";
   if (t) return t;
   const url = page?.url || "";
   try {
@@ -187,9 +173,6 @@ function euclideanDistance(a, b) {
   return Math.sqrt(sum);
 }
 
-/**
- * Compute PageRank once for a dataset; capped iterations for speed.
- */
 async function computePageRanksForDataset(datasetName, pages) {
   if (!Array.isArray(pages) || pages.length === 0) return new Map();
 
@@ -205,7 +188,6 @@ async function computePageRanksForDataset(datasetName, pages) {
 
   console.log(`[pr ${datasetName}] links=${allLinks.length} pages=${pages.length}`);
 
-  // adjacency as arrays for speed
   const outSets = Array.from({ length: N }, () => new Set());
   for (const l of allLinks) {
     const fromIdx = indexByUrl.get(l.from);
@@ -220,7 +202,7 @@ async function computePageRanksForDataset(datasetName, pages) {
 
   const alpha = 0.1;
   const threshold = 0.0001;
-  const MAX_ITERS = 60; // optimize for speed
+  const MAX_ITERS = 60;
 
   let pr = Array(N).fill(1 / N);
   let next = Array(N).fill(0);
@@ -230,12 +212,13 @@ async function computePageRanksForDataset(datasetName, pages) {
     for (let i = 0; i < N; i++) next[i] = base;
 
     let danglingMass = 0;
-    for (let i = 0; i < N; i++) if (outDeg[i] === 0) danglingMass += pr[i];
+    for (let i = 0; i < N; i++) {
+      if (outDeg[i] === 0) danglingMass += pr[i];
+    }
 
     const danglingContribution = (1 - alpha) * (danglingMass / N);
     for (let i = 0; i < N; i++) next[i] += danglingContribution;
 
-    // normal
     for (let j = 0; j < N; j++) {
       const d = outDeg[j];
       if (d === 0) continue;
@@ -254,13 +237,6 @@ async function computePageRanksForDataset(datasetName, pages) {
   return prMap;
 }
 
-/**
- * Warm dataset cache:
- * - load pages once (projection; exclude html)
- * - build DF/IDF once
- * - mark ready BEFORE PR
- * - compute PR best-effort (doesn't block readiness)
- */
 async function warmDataset(datasetName) {
   const st = getDatasetState(datasetName);
   if (st.ready) return;
@@ -276,7 +252,6 @@ async function warmDataset(datasetName) {
 
     st.pages = pages;
 
-    // build DF then IDF
     const df = Object.create(null);
     for (const p of pages) {
       const tf = p.termFreq || {};
@@ -290,7 +265,6 @@ async function warmDataset(datasetName) {
     }
     st.idf = idf;
 
-    // Allow search immediately (even if PR is still computing)
     st.ready = true;
 
     try {
@@ -307,14 +281,13 @@ async function warmDataset(datasetName) {
   return st.warmingPromise;
 }
 
-// -------------------- Search handler (fast, <1s) --------------------
+// -------------------- Search handler --------------------
 function makeSearchHandler(datasetNameOrParam = null) {
   return async (req, res) => {
     try {
       const datasetName = datasetNameOrParam ?? req.params.datasetName;
       const st = getDatasetState(datasetName);
 
-      // Kick off warm in background if needed; DO NOT await (keeps request fast).
       if (!st.ready) {
         warmDataset(datasetName);
         return res.status(202).json({ result: [], warming: true });
@@ -357,7 +330,6 @@ function makeSearchHandler(datasetNameOrParam = null) {
 
       const qLen = rawQueryWords.length;
 
-      // query vector + magnitude
       const qVec = new Array(vocab.length);
       let qMag2 = 0;
       for (let i = 0; i < vocab.length; i++) {
@@ -388,7 +360,7 @@ function makeSearchHandler(datasetNameOrParam = null) {
         }
 
         const pMag = Math.sqrt(pMag2);
-        const base = (pMag === 0 || qMag === 0) ? 0 : dot / (pMag * qMag);
+        const base = pMag === 0 || qMag === 0 ? 0 : dot / (pMag * qMag);
 
         const pr = getPr(p);
         const score = boost ? base * (1 + pr) : base;
@@ -410,12 +382,12 @@ function makeSearchHandler(datasetNameOrParam = null) {
   };
 }
 
-// -------------------- Routes --------------------
+// -------------------- Basic routes --------------------
 app.get("/", (req, res) => {
   res.send("Server running. Open /index.html for the client.");
 });
 
-// -------------------- Routes: products --------------------
+// -------------------- Products routes --------------------
 app.get("/products", async (req, res) => {
   const name = typeof req.query.name === "string" ? req.query.name.trim() : "";
   const stock = typeof req.query.stock === "string" ? req.query.stock : "all";
@@ -460,7 +432,7 @@ app.get("/products/:id", async (req, res) => {
   }
 });
 
-// -------------------- Routes: reviews --------------------
+// -------------------- Reviews routes --------------------
 app.post("/reviews/:id", async (req, res) => {
   try {
     const _id = new ObjectId(req.params.id);
@@ -506,7 +478,7 @@ app.get("/reviews/:id", async (req, res) => {
   }
 });
 
-// -------------------- Routes: orders --------------------
+// -------------------- Orders routes --------------------
 function normalizeOrderItems(items) {
   const map = new Map();
   for (const it of items) {
@@ -517,7 +489,6 @@ function normalizeOrderItems(items) {
 
 app.post("/orders", async (req, res) => {
   const { customerName, items } = req.body ?? {};
-
   const problems = [];
 
   if (typeof customerName !== "string" || customerName.trim().length === 0) {
@@ -547,7 +518,6 @@ app.post("/orders", async (req, res) => {
   }
 
   const normalized = normalizeOrderItems(items);
-
   const parsed = [];
   for (const it of normalized) {
     let _id;
@@ -646,12 +616,7 @@ app.get("/orders/:id", async (req, res) => {
   }
 });
 
-/**
- * 1) GET /:datasetName/popular
- * 2) GET /:datasetName/pages/:pageId
- */
-
-// Popular pages: top 10 by unique incoming link count
+// -------------------- Popular pages --------------------
 app.get("/:datasetName/popular", async (req, res) => {
   const datasetName = req.params.datasetName;
   const base = `${req.protocol}://${req.get("host")}`;
@@ -712,7 +677,9 @@ function pageToHtml(webUrl, incomingLinks, outgoingLinks, wordFrequency, dataset
     try {
       const parts = new URL(webUrl).pathname.split("/").filter(Boolean);
       return parts[parts.length - 1] || webUrl;
-    } catch { return webUrl; }
+    } catch {
+      return webUrl;
+    }
   })();
 
   const wordRows = Object.entries(wordFrequency)
@@ -768,7 +735,6 @@ function pageToHtml(webUrl, incomingLinks, outgoingLinks, wordFrequency, dataset
 </html>`;
 }
 
-// Page details: original URL + list of unique incoming links
 app.get("/:datasetName/pages/:pageId", async (req, res) => {
   const datasetName = req.params.datasetName;
   const pageId = req.params.pageId;
@@ -809,7 +775,6 @@ app.get("/:datasetName/pages/:pageId", async (req, res) => {
   }
 });
 
-// Optional fallback by URL
 app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   const datasetName = req.params.datasetName;
   const webUrl = decodeURIComponent(req.params.encodedUrl);
@@ -847,7 +812,6 @@ app.get("/pageranks", async (req, res) => {
       return res.status(400).type("text/plain").send("Missing query parameter url");
     }
 
-    // dataset lookup (fast)
     const page = await pagesCol().findOne({ url }, { projection: { dataset: 1 } });
     if (!page) {
       return res.status(404).type("text/plain").send("URL not found");
@@ -856,7 +820,6 @@ app.get("/pageranks", async (req, res) => {
     const datasetName = page.dataset;
     const st = getDatasetState(datasetName);
 
-    // If cache not ready, warm in background and return 0 quickly (graceful).
     if (!st.ready) {
       warmDataset(datasetName);
       return res.type("text/plain").send("0");
@@ -872,68 +835,101 @@ app.get("/pageranks", async (req, res) => {
   }
 });
 
-// Lab 6 /recommendations/:datasetName?type=user&user=...&item=...
-app.get("/recommendations/:datasetName", async (req, res) => {
-  try {
-    const datasetName = req.params.datasetName;
-
-    const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
-    const user = typeof req.query.user === "string" ? req.query.user.trim() : "";
-    const item = typeof req.query.item === "string" ? req.query.item.trim() : "";
-
-    if (!type || !user || !item) {
-      return res.status(400).json({ error: "Missing required query parameters: type, user, item" });
-    }
-
-    const filePath = DATASET_FILES[datasetName];
-    if (!filePath) {
-      return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
-    }
-
-    const ds = await loadDatasetFromFile(datasetName, filePath);
-    const k = 2;
-
-    let result;
-    if (type === "item") {
-      result = getItemBasedTruthOrGuess(ds, user, item, k);
-    }
-    else if (type === "user") {
-      result = getUserBasedTruthOrGuess(ds, user, item, k);
-    }
-    else {
-      return res.status(400).json({ error: "type must be 'user' or 'item'" });
-    }
-
-    if (result.error) {
-      return res.status(400).json({ error: result.error });
-    }
-
-    return res.json(result);
-  } catch (e) {
-    console.error("recommendations error:", e);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// Lab 8 MAE evaluation via Leave-One-Out cross-validation
+// -------------------- MAE endpoint --------------------
 const maeCache = new Map();
+
+function parseMaeType(v) {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "user";
+  return s || "user";
+}
+
+function parseMaeMode(v) {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "topk";
+  return s || "topk";
+}
+
+function parseMaeK(v) {
+  const n = Number.parseInt(String(v ?? "5"), 10);
+  if (!Number.isFinite(n) || n <= 0) return 5;
+  return n;
+}
+
+function parseMaeThreshold(v) {
+  const n = Number.parseFloat(String(v ?? "0"));
+  if (!Number.isFinite(n)) return 0;
+  return n;
+}
+
+function parseMaeNegCorr(v) {
+  return String(v ?? "false").trim().toLowerCase() === "true";
+}
 
 app.get("/mae/:datasetName", async (req, res) => {
   try {
     const datasetName = req.params.datasetName;
     const filePath = DATASET_FILES[datasetName];
+
     if (!filePath) {
       return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
     }
 
-    if (maeCache.has(datasetName)) {
-      return res.json(maeCache.get(datasetName));
+    const type = parseMaeType(req.query.type);
+    const mode = parseMaeMode(req.query.mode);
+    const k = parseMaeK(req.query.k);
+    const threshold = parseMaeThreshold(req.query.threshold);
+    const negCorr = parseMaeNegCorr(req.query.negCorr);
+
+    if (type !== "user" && type !== "item") {
+      return res.status(400).json({ error: "type must be 'user' or 'item'" });
+    }
+
+    if (mode !== "topk" && mode !== "threshold") {
+      return res.status(400).json({ error: "mode must be 'topk' or 'threshold'" });
+    }
+
+    if (!Number.isInteger(k) || k <= 0) {
+      return res.status(400).json({ error: "k must be a positive integer" });
+    }
+
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      return res.status(400).json({ error: "threshold must be between 0 and 1" });
+    }
+
+    const cacheKey = `${datasetName}-${type}-${mode}-${k}-${threshold}-${negCorr}`;
+
+    if (maeCache.has(cacheKey)) {
+      return res.json({
+        ...maeCache.get(cacheKey),
+        durationMs: 0,
+      });
     }
 
     const ds = await loadDatasetFromFile(datasetName, filePath);
-    const result = await computeMAE(ds, 5, "user");
-    const response = { ...result, dataset: datasetName };
-    maeCache.set(datasetName, response);
+
+    const start = Date.now();
+    const result = await computeMAE(ds, {
+      type,
+      mode,
+      k,
+      threshold,
+      negCorr,
+    });
+    const durationMs = Date.now() - start;
+
+    const response = {
+      dataset: datasetName,
+      type,
+      mode,
+      k,
+      threshold,
+      negCorr,
+      mae: result.mae,
+      count: result.count,
+      fallbackCount: result.fallbackCount ?? 0,
+      durationMs,
+    };
+
+    maeCache.set(cacheKey, response);
     return res.json(response);
   } catch (e) {
     console.error("MAE error:", e);
@@ -941,7 +937,7 @@ app.get("/mae/:datasetName", async (req, res) => {
   }
 });
 
-// Assignment 1 Search Routes
+// -------------------- Search routes --------------------
 app.get("/fruitsA", makeSearchHandler("fruitsA"));
 app.get("/personal", makeSearchHandler("personal"));
 app.get("/:datasetName", makeSearchHandler(null));
@@ -952,7 +948,6 @@ connectDB()
       console.log(`Server listening on port ${PORT}`);
     });
 
-    // Warm datasets in background (do not block listening)
     warmDataset("fruitsA");
     warmDataset("personal");
   })
