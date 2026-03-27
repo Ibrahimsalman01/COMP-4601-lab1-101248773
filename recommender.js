@@ -157,6 +157,15 @@ async function loadDatasetFromFile(datasetName, filePath) {
     return sim;
   }
 
+  function invalidateUserSims(u) {
+    for (let v = 0; v < N; v++) {
+      if (v === u) continue;
+      const a = Math.min(u, v);
+      const b = Math.max(u, v);
+      userSimCache.delete(`${a}|${b}`);
+    }
+  }
+
   const ds = {
     name: datasetName,
     N,
@@ -170,6 +179,7 @@ async function loadDatasetFromFile(datasetName, filePath) {
     globalMean: gMean,
     getUserSim,
     getItemSim,
+    invalidateUserSims,
   };
 
   datasetCache.set(datasetName, ds);
@@ -284,15 +294,7 @@ function getItemBasedTruthOrGuess(ds, userName, itemName, k = 2) {
 
 // -------- Leave-One-Out MAE evaluation --------
 async function computeMAE(ds, k = 5, type = "user") {
-  // Step 1: Pre-warm all user-user similarities using the full dataset.
-  // This must happen BEFORE any LOO mutations so cached values are correct.
-  for (let u = 0; u < ds.N; u++) {
-    for (let v = u + 1; v < ds.N; v++) {
-      ds.getUserSim(u, v);
-    }
-  }
-
-  // Step 2: Build per-user rated-item index (avoids scanning 4423 cols per iteration).
+  // Step 1: Build per-user rated-item index (avoids scanning 4423 cols per iteration).
   const userRatedItems = ds.ratings.map((row) => {
     const indices = [];
     for (let j = 0; j < row.length; j++) {
@@ -310,6 +312,9 @@ async function computeMAE(ds, k = 5, type = "user") {
 
     for (const i of ratedItems) {
       const actual = ds.ratings[u][i];
+
+      // Invalidate cached similarities involving user u before hiding the rating
+      ds.invalidateUserSims(u);
 
       // Temporarily hide this rating
       ds.ratings[u][i] = 0;
