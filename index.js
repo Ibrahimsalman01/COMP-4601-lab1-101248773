@@ -915,9 +915,6 @@ app.get("/recommendations/:datasetName", async (req, res) => {
   }
 });
 
-// Lab 8 MAE evaluation via Leave-One-Out cross-validation
-const maeCache = new Map();
-
 app.get("/mae/:datasetName", async (req, res) => {
   try {
     const datasetName = req.params.datasetName;
@@ -926,15 +923,15 @@ app.get("/mae/:datasetName", async (req, res) => {
       return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
     }
 
-    if (maeCache.has(datasetName)) {
-      return res.json(maeCache.get(datasetName));
-    }
+    const type = req.query.type || "user";
 
     const ds = await loadDatasetFromFile(datasetName, filePath);
-    const result = await computeMAE(ds, 5, "user");
-    const response = { ...result, dataset: datasetName };
-    maeCache.set(datasetName, response);
-    return res.json(response);
+    const result = await computeMAE(ds, {
+      type,
+      k: 5,
+    });
+
+    return res.json({ ...result, dataset: datasetName });
   } catch (e) {
     console.error("MAE error:", e);
     return res.status(500).json({ error: "Internal server error" });
