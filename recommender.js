@@ -164,6 +164,114 @@ function selectNeighbors(candidates, { mode, k, threshold, negCorr }) {
   return [];
 }
 
+function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
+  const u = ds.userIndex.get(userName);
+  const i = ds.itemIndex.get(itemName);
+
+  if (u === undefined) return { error: `Unknown user: ${userName}` };
+  if (i === undefined) return { error: `Unknown item: ${itemName}` };
+
+  const current = ds.ratings[u][i];
+  if (isRated(current)) {
+    return { score: current, source: "truth" };
+  }
+
+  const candidates = [];
+
+  // Only users who rated item i can be neighbors
+  for (const v of ds.itemRatedByUsers[i]) {
+    if (v === u) continue;
+
+    const neighborRating = ds.ratings[v][i];
+    if (!isRated(neighborRating)) continue;
+
+    const sim = pearsonSimilarity(ds, u, v, ds.userMeans);
+
+    // keep all similarities, including negative ones
+    candidates.push({ v, sim, rating: neighborRating });
+  }
+
+  candidates.sort((a, b) => b.sim - a.sim);
+  const neighbors = candidates.slice(0, k);
+
+  const mu = ds.userMeans[u] || ds.globalMean;
+
+  if (neighbors.length === 0) {
+    return { score: mu, source: "guess" };
+  }
+
+  let num = 0;
+  let den = 0;
+
+  for (const n of neighbors) {
+    num += n.sim * (n.rating - ds.userMeans[n.v]);
+    den += Math.abs(n.sim);
+  }
+
+  if (den === 0) {
+    return { score: mu, source: "guess" };
+  }
+
+  return {
+    score: clampRating(ds, mu + num / den),
+    source: "guess",
+  };
+}
+
+function getItemBasedTruthOrGuess(ds, userName, itemName, k = 2) {
+  const u = ds.userIndex.get(userName);
+  const i = ds.itemIndex.get(itemName);
+
+  if (u === undefined) return { error: `Unknown user: ${userName}` };
+  if (i === undefined) return { error: `Unknown item: ${itemName}` };
+
+  const current = ds.ratings[u][i];
+  if (isRated(current)) {
+    return { score: current, source: "truth" };
+  }
+
+  const candidates = [];
+
+  // Only items already rated by this user can be neighbors
+  for (const j of ds.userRatedItems[u]) {
+    if (j === i) continue;
+
+    const userRatingOnJ = ds.ratings[u][j];
+    if (!isRated(userRatingOnJ)) continue;
+
+    const sim = adjustedCosineSimilarity(ds, i, j, ds.userMeans);
+
+    // only consider similarity > 0
+    if (sim > 0) {
+      candidates.push({ j, sim, rating: userRatingOnJ });
+    }
+  }
+
+  candidates.sort((a, b) => b.sim - a.sim);
+  const neighbors = candidates.slice(0, k);
+
+  if (neighbors.length === 0) {
+    return { score: ds.userMeans[u] || ds.globalMean, source: "guess" };
+  }
+
+  let num = 0;
+  let den = 0;
+
+  for (const n of neighbors) {
+    num += n.sim * n.rating;
+    den += Math.abs(n.sim);
+  }
+
+  if (den === 0) {
+    return { score: ds.userMeans[u] || ds.globalMean, source: "guess" };
+  }
+
+  return {
+    score: clampRating(ds, num / den),
+    source: "guess",
+  };
+}
+
 async function loadDatasetFromFile(datasetName, filePath) {
   if (datasetCache.has(datasetName)) {
     return datasetCache.get(datasetName);
@@ -420,4 +528,6 @@ async function computeMAE(
 module.exports = {
   loadDatasetFromFile,
   computeMAE,
+  getUserBasedTruthOrGuess,
+  getItemBasedTruthOrGuess,
 };
