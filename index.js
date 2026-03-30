@@ -805,6 +805,7 @@ app.get("/:datasetName/pages/byUrl/:encodedUrl", async (req, res) => {
   }
 });
 
+// Lab 5
 app.get("/pageranks", async (req, res) => {
   try {
     const url = typeof req.query.url === "string" ? req.query.url.trim() : "";
@@ -832,6 +833,49 @@ app.get("/pageranks", async (req, res) => {
   } catch (err) {
     console.error("Pagerank error:", err);
     return res.status(500).type("text/plain").send("Internal server error");
+  }
+});
+
+// Lab 6 /recommendations/:datasetName?type=user&user=...&item=...
+app.get("/recommendations/:datasetName", async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+
+    const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
+    const user = typeof req.query.user === "string" ? req.query.user.trim() : "";
+    const item = typeof req.query.item === "string" ? req.query.item.trim() : "";
+
+    if (!type || !user || !item) {
+      return res.status(400).json({ error: "Missing required query parameters: type, user, item" });
+    }
+
+    const filePath = DATASET_FILES[datasetName];
+    if (!filePath) {
+      return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
+    }
+
+    const ds = await loadDatasetFromFile(datasetName, filePath);
+    const k = 2;
+
+    let result;
+    if (type === "item") {
+      result = getItemBasedTruthOrGuess(ds, user, item, k);
+    }
+    else if (type === "user") {
+      result = getUserBasedTruthOrGuess(ds, user, item, k);
+    }
+    else {
+      return res.status(400).json({ error: "type must be 'user' or 'item'" });
+    }
+
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    return res.json(result);
+  } catch (e) {
+    console.error("recommendations error:", e);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 

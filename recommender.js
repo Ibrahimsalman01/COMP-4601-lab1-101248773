@@ -22,17 +22,19 @@ function computeGlobalMean(ratings) {
   return count > 0 ? sum / count : 0;
 }
 
-function computeUserMeans(ratings) {
+function computeUserMeans(ratings, fallbackMean = 0) {
   return ratings.map((row) => {
     let sum = 0;
     let count = 0;
+
     for (const x of row) {
       if (isRated(x)) {
         sum += x;
         count++;
       }
     }
-    return count > 0 ? sum / count : 0;
+
+    return count > 0 ? sum / count : fallbackMean;
   });
 }
 
@@ -50,7 +52,7 @@ function computeMinMaxRating(ratings) {
   }
 
   if (!Number.isFinite(minRating) || !Number.isFinite(maxRating)) {
-    return { minRating: 0.5, maxRating: 5.0 };
+    return { minRating: 1, maxRating: 5 };
   }
 
   return { minRating, maxRating };
@@ -60,37 +62,18 @@ function clampRating(ds, value) {
   return Math.max(ds.minRating, Math.min(ds.maxRating, value));
 }
 
-function meanWithout(ds, userIdx, heldOutItemIdx) {
-  let sum = 0;
-  let count = 0;
-
-  for (const j of ds.userRatedItems[userIdx]) {
-    if (j === heldOutItemIdx) continue;
-    const r = ds.ratings[userIdx][j];
-    if (isRated(r)) {
-      sum += r;
-      count++;
-    }
-  }
-
-  return count > 0 ? sum / count : ds.globalMean;
+function meanWithoutFast(ds, userIdx, heldOutRatingValue) {
+  const newCount = ds.userCount[userIdx] - 1;
+  if (newCount <= 0) return ds.globalMean;
+  return (ds.userSum[userIdx] - heldOutRatingValue) / newCount;
 }
 
-function userMeanWithout(ds, userIdx, heldOutItemIdx) {
-  return meanWithout(ds, userIdx, heldOutItemIdx);
-}
-
-function pearsonSimilarity(ds, uIdx, vIdx, heldOutUserIdx = -1, heldOutItemIdx = -1) {
+function pearsonSimilarity(ds, uIdx, vIdx, userMeans) {
   const ru = ds.ratings[uIdx];
   const rv = ds.ratings[vIdx];
 
-  const mu = (uIdx === heldOutUserIdx)
-    ? userMeanWithout(ds, uIdx, heldOutItemIdx)
-    : ds.userMeans[uIdx];
-
-  const mv = (vIdx === heldOutUserIdx)
-    ? userMeanWithout(ds, vIdx, heldOutItemIdx)
-    : ds.userMeans[vIdx];
+  const mu = userMeans[uIdx];
+  const mv = userMeans[vIdx];
 
   let num = 0;
   let du2 = 0;
@@ -119,7 +102,7 @@ function pearsonSimilarity(ds, uIdx, vIdx, heldOutUserIdx = -1, heldOutItemIdx =
   return num / den;
 }
 
-function adjustedCosineSimilarity(ds, itemA, itemB, heldOutUserIdx = -1, heldOutItemIdx = -1) {
+function adjustedCosineSimilarity(ds, itemA, itemB, userMeans) {
   let num = 0;
   let da2 = 0;
   let db2 = 0;
@@ -130,10 +113,7 @@ function adjustedCosineSimilarity(ds, itemA, itemB, heldOutUserIdx = -1, heldOut
     const rb = ds.ratings[u][itemB];
     if (!isRated(ra) || !isRated(rb)) continue;
 
-    const meanU = (u === heldOutUserIdx)
-      ? userMeanWithout(ds, u, heldOutItemIdx)
-      : ds.userMeans[u];
-
+    const meanU = userMeans[u];
     const da = ra - meanU;
     const db = rb - meanU;
 
@@ -184,6 +164,114 @@ function selectNeighbors(candidates, { mode, k, threshold, negCorr }) {
   return [];
 }
 
+function getUserBasedTruthOrGuess(ds, userName, itemName, k = 2) {
+  const u = ds.userIndex.get(userName);
+  const i = ds.itemIndex.get(itemName);
+
+  if (u === undefined) return { error: `Unknown user: ${userName}` };
+  if (i === undefined) return { error: `Unknown item: ${itemName}` };
+
+  const current = ds.ratings[u][i];
+  if (isRated(current)) {
+    return { score: current, source: "truth" };
+  }
+
+  const candidates = [];
+
+  // Only users who rated item i can be neighbors
+  for (const v of ds.itemRatedByUsers[i]) {
+    if (v === u) continue;
+
+    const neighborRating = ds.ratings[v][i];
+    if (!isRated(neighborRating)) continue;
+
+    const sim = pearsonSimilarity(ds, u, v, ds.userMeans);
+
+    // keep all similarities, including negative ones
+    candidates.push({ v, sim, rating: neighborRating });
+  }
+
+  candidates.sort((a, b) => b.sim - a.sim);
+  const neighbors = candidates.slice(0, k);
+
+  const mu = ds.userMeans[u] || ds.globalMean;
+
+  if (neighbors.length === 0) {
+    return { score: mu, source: "guess" };
+  }
+
+  let num = 0;
+  let den = 0;
+
+  for (const n of neighbors) {
+    num += n.sim * (n.rating - ds.userMeans[n.v]);
+    den += Math.abs(n.sim);
+  }
+
+  if (den === 0) {
+    return { score: mu, source: "guess" };
+  }
+
+  return {
+    score: clampRating(ds, mu + num / den),
+    source: "guess",
+  };
+}
+
+function getItemBasedTruthOrGuess(ds, userName, itemName, k = 2) {
+  const u = ds.userIndex.get(userName);
+  const i = ds.itemIndex.get(itemName);
+
+  if (u === undefined) return { error: `Unknown user: ${userName}` };
+  if (i === undefined) return { error: `Unknown item: ${itemName}` };
+
+  const current = ds.ratings[u][i];
+  if (isRated(current)) {
+    return { score: current, source: "truth" };
+  }
+
+  const candidates = [];
+
+  // Only items already rated by this user can be neighbors
+  for (const j of ds.userRatedItems[u]) {
+    if (j === i) continue;
+
+    const userRatingOnJ = ds.ratings[u][j];
+    if (!isRated(userRatingOnJ)) continue;
+
+    const sim = adjustedCosineSimilarity(ds, i, j, ds.userMeans);
+
+    // only consider similarity > 0
+    if (sim > 0) {
+      candidates.push({ j, sim, rating: userRatingOnJ });
+    }
+  }
+
+  candidates.sort((a, b) => b.sim - a.sim);
+  const neighbors = candidates.slice(0, k);
+
+  if (neighbors.length === 0) {
+    return { score: ds.userMeans[u] || ds.globalMean, source: "guess" };
+  }
+
+  let num = 0;
+  let den = 0;
+
+  for (const n of neighbors) {
+    num += n.sim * n.rating;
+    den += Math.abs(n.sim);
+  }
+
+  if (den === 0) {
+    return { score: ds.userMeans[u] || ds.globalMean, source: "guess" };
+  }
+
+  return {
+    score: clampRating(ds, num / den),
+    source: "guess",
+  };
+}
+
 async function loadDatasetFromFile(datasetName, filePath) {
   if (datasetCache.has(datasetName)) {
     return datasetCache.get(datasetName);
@@ -218,38 +306,42 @@ async function loadDatasetFromFile(datasetName, filePath) {
   }
 
   const ratings = [];
-  for (let u = 0; u < N; u++) {
-    const rowLine = lines[3 + u];
+  for (let r = 0; r < N; r++) {
+    const rowLine = lines[3 + r];
     if (!rowLine) {
-      throw new Error(`Missing ratings row ${u + 1}`);
+      throw new Error(`Missing ratings row ${r + 1}`);
     }
 
     const row = rowLine.split(/\s+/).map(Number);
     if (row.length !== M) {
-      throw new Error(`Expected ${M} ratings in row ${u + 1}, got ${row.length}`);
+      throw new Error(`Expected ${M} ratings in row ${r + 1}, got ${row.length}`);
     }
 
     ratings.push(row);
   }
 
-  const userIndex = new Map(users.map((u, idx) => [u, idx]));
-  const itemIndex = new Map(items.map((i, idx) => [i, idx]));
+  const userIndex = new Map(users.map((u, i) => [u, i]));
+  const itemIndex = new Map(items.map((it, i) => [it, i]));
+  const globalMean = computeGlobalMean(ratings);
+  const userMeans = computeUserMeans(ratings, globalMean);
+  const { minRating, maxRating } = computeMinMaxRating(ratings);
 
   const userRatedItems = Array.from({ length: N }, () => []);
   const itemRatedByUsers = Array.from({ length: M }, () => []);
+  const userSum = new Array(N).fill(0);
+  const userCount = new Array(N).fill(0);
 
   for (let u = 0; u < N; u++) {
     for (let i = 0; i < M; i++) {
-      if (isRated(ratings[u][i])) {
-        userRatedItems[u].push(i);
-        itemRatedByUsers[i].push(u);
-      }
+      const r = ratings[u][i];
+      if (!isRated(r)) continue;
+
+      userRatedItems[u].push(i);
+      itemRatedByUsers[i].push(u);
+      userSum[u] += r;
+      userCount[u]++;
     }
   }
-
-  const userMeans = computeUserMeans(ratings);
-  const globalMean = computeGlobalMean(ratings);
-  const { minRating, maxRating } = computeMinMaxRating(ratings);
 
   const ds = {
     name: datasetName,
@@ -260,12 +352,14 @@ async function loadDatasetFromFile(datasetName, filePath) {
     ratings,
     userIndex,
     itemIndex,
-    userRatedItems,
-    itemRatedByUsers,
-    userMeans,
     globalMean,
+    userMeans,
     minRating,
     maxRating,
+    userRatedItems,
+    itemRatedByUsers,
+    userSum,
+    userCount,
   };
 
   datasetCache.set(datasetName, ds);
@@ -294,6 +388,9 @@ async function computeMAE(
   let count = 0;
   let fallbackCount = 0;
 
+  // Reuse one means array. For each LOO trial, only user u's mean changes.
+  const looUserMeans = ds.userMeans.slice();
+
   for (let u = 0; u < ds.N; u++) {
     for (const i of ds.userRatedItems[u]) {
       const actual = ds.ratings[u][i];
@@ -302,20 +399,24 @@ async function computeMAE(
       // Leave one out
       ds.ratings[u][i] = 0;
 
-      const baseMean = meanWithout(ds, u, i);
+      const savedMeanU = looUserMeans[u];
+      const baseMean = meanWithoutFast(ds, u, actual);
+      looUserMeans[u] = baseMean;
+
       let pred = baseMean;
       let usedFallback = false;
 
       if (type === "user") {
         const candidates = [];
 
-        for (let v = 0; v < ds.N; v++) {
+        // Only users who rated item i can be neighbors.
+        for (const v of ds.itemRatedByUsers[i]) {
           if (v === u) continue;
 
           const rv = ds.ratings[v][i];
           if (!isRated(rv)) continue;
 
-          const sim = pearsonSimilarity(ds, u, v, u, i);
+          const sim = pearsonSimilarity(ds, u, v, looUserMeans);
           candidates.push({
             neighborId: v,
             sim,
@@ -338,12 +439,9 @@ async function computeMAE(
           let den = 0;
 
           for (const n of neighbors) {
-            const meanV = (n.neighborId === u)
-              ? userMeanWithout(ds, n.neighborId, i)
-              : ds.userMeans[n.neighborId];
-
+            const meanV = looUserMeans[n.neighborId];
             num += n.sim * (n.rating - meanV);
-            den += n.sim;
+            den += Math.abs(n.sim);
           }
 
           if (Math.abs(den) < 1e-12) {
@@ -356,13 +454,14 @@ async function computeMAE(
       } else {
         const candidates = [];
 
+        // Only items already rated by user u can be neighbors.
         for (const j of ds.userRatedItems[u]) {
           if (j === i) continue;
 
           const ruj = ds.ratings[u][j];
           if (!isRated(ruj)) continue;
 
-          const sim = adjustedCosineSimilarity(ds, i, j, u, i);
+          const sim = adjustedCosineSimilarity(ds, i, j, looUserMeans);
           candidates.push({
             neighborId: j,
             sim,
@@ -407,7 +506,8 @@ async function computeMAE(
         fallbackCount++;
       }
 
-      // Restore held-out rating
+      // Restore
+      looUserMeans[u] = savedMeanU;
       ds.ratings[u][i] = actual;
     }
   }
@@ -416,10 +516,18 @@ async function computeMAE(
     mae: count > 0 ? totalAbsError / count : 0,
     count,
     fallbackCount,
+    k,
+    type,
+    mode,
+    threshold,
+    negCorr,
+    dataset: ds.name,
   };
 }
 
 module.exports = {
   loadDatasetFromFile,
   computeMAE,
+  getUserBasedTruthOrGuess,
+  getItemBasedTruthOrGuess,
 };
