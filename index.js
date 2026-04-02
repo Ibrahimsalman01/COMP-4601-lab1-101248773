@@ -5,6 +5,16 @@ const { ObjectId } = require("mongodb");
 const express = require("express");
 const path = require("path");
 
+const { readFile, loadDatasetFromFile } = require("./recommender");
+
+const DATASET_FILES = {
+  test: path.join(__dirname, "test.txt"),
+  test2: path.join(__dirname, "test2.txt"),
+  test3: path.join(__dirname, "test3.txt"),
+  test4: path.join(__dirname, "test4.txt"),
+  test5: path.join(__dirname, "test5.txt")
+};
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -108,6 +118,77 @@ function reviewsToHtml(product) {
 </body>
 </html>`;
 }
+
+// ------------------------------- Lab 9 ----------------------------
+app.get('/recommendations/:datasetName', async (req, res) => {
+  try {
+    const datasetName = req.params.datasetName;
+
+    const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
+
+    if (!type) {
+      return res.status(400).json({ error: "Missing required query parameters: type" });
+    }
+
+    const filePath = DATASET_FILES[datasetName];
+    if (!filePath) {
+      return res.status(404).json({ error: `Unknown dataset: ${datasetName}` });
+    }
+
+    const ds = await loadDatasetFromFile(datasetName, filePath);
+
+    // 1. get items that user1 rated 1
+    const userOneRatedItems = ds.ratings[0];
+    const otherUserRatedItems = ds.ratings.slice(1);
+
+    // 2. find the users that are connected to those items
+    const connectedPaths = Array.from({ length: ds.N - 1 }, () => new Array(ds.M).fill(0));
+    // console.log(connectedPaths);
+    for (let i = 0; i < otherUserRatedItems.length; i++) {
+      for (let j = 0; j < otherUserRatedItems[i].length; j++) {
+        if (otherUserRatedItems[i][j] === 1 && userOneRatedItems[j] === 1) connectedPaths[i][j] = 1;
+        else connectedPaths[i][j] = 0;
+      } 
+    }
+
+    // intermediary step to filter out any of the connectedPaths' arrays that don't have any 1s
+    const filteredConnectedPaths = connectedPaths.filter((arr) => !arr.every(val => val === 0));
+    
+    // 3. check out the items those users liked, that user1 hasn't already liked
+    // in other words, take note of the values that are 1 for other users and 0 for user1
+    const itemsToRecommend = Array.from({ length: filteredConnectedPaths.length }, () => new Array(ds.M).fill(0));
+    for (let i = 0; i < filteredConnectedPaths.length; i++) {
+      for (let j = 0; j < filteredConnectedPaths[i].length; j++) {
+        if (otherUserRatedItems[i][j] === 1 && userOneRatedItems[j] === 0) itemsToRecommend[i][j] = 1;
+        else itemsToRecommend[i][j] = 0;
+      } 
+    }
+    console.log(itemsToRecommend);
+
+    // 4. count the paths to those items and rank based on most paths to least
+    const results = [];
+    for (let i = 0; i < filteredConnectedPaths.length; i++) {
+      const pathCount = filteredConnectedPaths[i].reduce((sum, val) => sum + val, 0);
+
+      for (let j = 0; j < ds.M; j++) {
+        if (itemsToRecommend[i][j] === 1) {
+          let item = results.find(obj => obj.name === `Item${j + 1}`);
+          if (!item) {
+            item = { name: `Item${j + 1}`, votes: 0 };
+            results.push(item);
+          }
+          item.votes += pathCount;
+        }
+      }
+    }
+
+    results.sort((a, b) => b.votes - a.votes);
+    return res.json({ results });
+  } catch (e) {
+    console.error(e)
+  }
+});
+
 
 // -------------------- Search + PageRank caches --------------------
 /**
@@ -869,9 +950,11 @@ connectDB()
       console.log(`Server listening on port ${PORT}`);
     });
 
-    // Warm datasets in background (do not block listening)
-    warmDataset("fruitsA");
-    warmDataset("personal");
+    // // Warm datasets in background (do not block listening)
+    // warmDataset("fruitsA");
+    // warmDataset("personal");
+
+    // readFile('./test.txt');
   })
   .catch((err) => {
     console.error("Failed to connect to MongoDB:", err);
