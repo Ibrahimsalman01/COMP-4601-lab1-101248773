@@ -258,7 +258,10 @@ function getItemBasedTruthOrGuess(ds, userName, itemName, k = 2) {
   let den = 0;
 
   for (const n of neighbors) {
-    num += n.sim * n.rating;
+    const effectiveRating = n.sim < 0
+      ? (ds.maxRating + ds.minRating - n.rating)
+      : n.rating;
+    num += Math.abs(n.sim) * effectiveRating;
     den += Math.abs(n.sim);
   }
 
@@ -484,7 +487,10 @@ async function computeMAE(
           let den = 0;
 
           for (const n of neighbors) {
-            num += n.sim * n.rating;
+            const effectiveRating = n.sim < 0
+              ? (ds.maxRating + ds.minRating - n.rating)
+              : n.rating;
+            num += Math.abs(n.sim) * effectiveRating;
             den += Math.abs(n.sim);
           }
 
